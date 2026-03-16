@@ -1,0 +1,182 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Doctor {
+  id           String  @id @default(uuid())
+  email        String  @unique
+  passwordHash String
+  name         String?
+  phone        String?
+
+  // Identity unik & immutable untuk Twilio Voice JS SDK
+  twilioIdentity String @unique
+
+  isActive        Boolean   @default(true)
+  emailVerifiedAt DateTime?
+
+  refreshTokens RefreshToken[]
+  consultations Consultation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+model RefreshToken {
+  id       String @id @default(uuid())
+  doctorId String
+  doctor   Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+
+  tokenHash String  @unique
+  userAgent String?
+  ip        String?
+
+  revokedAt DateTime?
+
+  replacedByTokenId String?       @unique
+  replacedByToken   RefreshToken? @relation("RefreshTokenReplacement", fields: [replacedByTokenId], references: [id])
+  replacesToken     RefreshToken? @relation("RefreshTokenReplacement")
+
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([doctorId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+}
+
+model Consultation {
+  id       String @id @default(uuid())
+  doctorId String
+  doctor   Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+
+  linkToken     String  @unique
+  roomName      String  @unique
+  twilioRoomSid String? @unique
+
+  status    ConsultationStatus @default(CREATED)
+  expiresAt DateTime?
+
+  patientIdentity String?
+  patientJoinedAt DateTime?
+
+  twilioCallSid String?
+  startedAt     DateTime?
+  endedAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  callSession      CallSession?
+  consultationNote ConsultationNote?
+
+  @@index([doctorId])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+model CallSession {
+  id             String       @id @default(cuid())
+  consultationId String       @unique
+  consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  status CallStatus @default(STARTED)
+
+  roomSid         String? @unique
+  roomName        String?
+  doctorIdentity  String?
+  patientIdentity String?
+
+  startedAt DateTime?
+  endedAt   DateTime?
+
+  recordingEnabled     Boolean   @default(false)
+  recordingStatus      String?
+  recordingStartedAt   DateTime?
+  recordingCompletedAt DateTime?
+
+  compositionSid       String?   @unique
+  compositionStatus    String?
+  compositionStartedAt DateTime?
+  compositionReadyAt   DateTime?
+
+  mediaUrl    String?
+  mediaFormat String?
+  durationSec Int?
+
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ConsultationNote {
+  id             String       @id @default(uuid())
+  consultationId String       @unique
+  consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  transcriptRaw String?
+  summary       String?
+
+  subjective String?
+  objective  String?
+  assessment String?
+  plan       String?
+
+  aiStatus String? // PENDING | PROCESSING | COMPLETED | FAILED
+  aiError  String?
+
+  transcribedAt DateTime?
+  summarizedAt  DateTime?
+  aiModel       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AuthAuditLog {
+  id        String     @id @default(uuid())
+  doctorId  String?
+  email     String?
+  action    AuthAction
+  success   Boolean    @default(false)
+  ip        String?
+  userAgent String?
+  createdAt DateTime   @default(now())
+
+  @@index([doctorId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+enum ConsultationStatus {
+  CREATED // link dibuat
+  WAITING // pasien belum join / menunggu
+  IN_CALL // call sedang berlangsung
+  PROCESSING // rekaman diproses, transkrip/summarize
+  DONE
+  FAILED
+  EXPIRED
+}
+
+enum CallStatus {
+  STARTED
+  CONNECTED
+  RECORDING_READY
+  COMPLETED
+  FAILED
+}
+
+enum AuthAction {
+  REGISTER
+  LOGIN
+  LOGOUT
+  REFRESH
+  TOKEN_REVOKE
+}
