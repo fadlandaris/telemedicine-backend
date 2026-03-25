@@ -151,13 +151,6 @@ export class TwilioWebhookService {
     if (!callSession || !roomSid) return;
 
     await this.prisma.$transaction([
-      this.prisma.consultation.update({
-        where: { id: callSession.consultationId },
-        data: {
-          status: 'PROCESSING',
-          endedAt: callSession.consultation.endedAt ?? timestamp,
-        },
-      }),
       this.prisma.callSession.update({
         where: { id: callSession.id },
         data: {
@@ -166,15 +159,26 @@ export class TwilioWebhookService {
           recordingStatus: 'processing',
         },
       }),
+      this.prisma.consultationNote.upsert({
+        where: { consultationId: callSession.consultationId },
+        update: {
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'WAITING_RECORDING',
+          aiError: null,
+        },
+        create: {
+          consultationId: callSession.consultationId,
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'WAITING_RECORDING',
+          aiError: null,
+        },
+      }),
     ]);
 
-    setTimeout(() => {
-      this.twilioService
-        .tryCreateComposition(roomSid)
-        .catch((err) =>
-          this.logger.error(`tryCreateComposition failed on room-ended`, err),
-        );
-    }, 15000);
+    this.runInBackground(`tryCreateComposition:room-ended:${roomSid}`, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 15000));
+      await this.twilioService.tryCreateComposition(roomSid);
+    });
   }
 
   private async onRecordingStarted(body: WebhookBody, timestamp: Date) {
@@ -183,13 +187,29 @@ export class TwilioWebhookService {
 
     if (!callSession) return;
 
-    await this.prisma.callSession.update({
-      where: { id: callSession.id },
-      data: {
-        recordingStatus: 'started',
-        recordingStartedAt: callSession.recordingStartedAt ?? timestamp,
-      },
-    });
+    await this.prisma.$transaction([
+      this.prisma.callSession.update({
+        where: { id: callSession.id },
+        data: {
+          recordingStatus: 'started',
+          recordingStartedAt: callSession.recordingStartedAt ?? timestamp,
+        },
+      }),
+      this.prisma.consultationNote.upsert({
+        where: { consultationId: callSession.consultationId },
+        update: {
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'RECORDING_STARTED',
+          aiError: null,
+        },
+        create: {
+          consultationId: callSession.consultationId,
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'RECORDING_STARTED',
+          aiError: null,
+        },
+      }),
+    ]);
   }
 
   private async onRecordingCompleted(body: WebhookBody, timestamp: Date) {
@@ -198,15 +218,35 @@ export class TwilioWebhookService {
 
     if (!callSession || !roomSid) return;
 
-    await this.prisma.callSession.update({
-      where: { id: callSession.id },
-      data: {
-        recordingStatus: 'completed',
-        recordingCompletedAt: timestamp,
-      },
-    });
+    await this.prisma.$transaction([
+      this.prisma.callSession.update({
+        where: { id: callSession.id },
+        data: {
+          recordingStatus: 'completed',
+          recordingCompletedAt: timestamp,
+        },
+      }),
+      this.prisma.consultationNote.upsert({
+        where: { consultationId: callSession.consultationId },
+        update: {
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'RECORDING_COMPLETED',
+          aiError: null,
+        },
+        create: {
+          consultationId: callSession.consultationId,
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'RECORDING_COMPLETED',
+          aiError: null,
+        },
+      }),
+    ]);
 
-    await this.twilioService.tryCreateComposition(roomSid);
+    void this.twilioService.tryCreateComposition(roomSid).catch((err) => {
+      this.logger.error(
+        `tryCreateComposition failed on recording-completed roomSid=${roomSid} message=${err?.message || err}`,
+      );
+    });
   }
 
   private async onRecordingFailed(body: WebhookBody, _timestamp: Date) {
@@ -216,115 +256,172 @@ export class TwilioWebhookService {
     const callSession = await this.findCallSession(roomSid);
     if (!callSession) return;
 
-    await this.prisma.$transaction([
-      this.prisma.callSession.update({
-        where: { id: callSession.id },
-        data: {
-          status: 'FAILED',
-          recordingStatus: 'failed',
-          errorMessage,
+  await this.prisma.$transaction([
+    this.prisma.callSession.update({
+      where: { id: callSession.id },
+      data: {
+        status: 'FAILED',
+        recordingStatus: 'failed',
+        errorMessage,
+      },
+    }),
+      this.prisma.consultationNote.upsert({
+        where: { consultationId: callSession.consultationId },
+        update: {
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'FAILED',
+          aiError: errorMessage,
         },
-      }),
-      this.prisma.consultation.update({
-        where: { id: callSession.consultationId },
-        data: {
-          status: 'FAILED',
+        create: {
+          consultationId: callSession.consultationId,
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'FAILED',
+          aiError: errorMessage,
         },
       }),
     ]);
   }
 
-  private async onCompositionStarted(body: WebhookBody, timestamp: Date) {
-    const compositionSid = body.CompositionSid;
-    if (!compositionSid) return;
+ private async onCompositionStarted(body: WebhookBody, timestamp: Date) {
+  const compositionSid = body.CompositionSid;
+  if (!compositionSid) return;
 
-    await this.prisma.callSession.updateMany({
-      where: { compositionSid },
-      data: {
-        compositionStatus: 'started',
-        compositionStartedAt: timestamp,
-      },
-    });
+  const callSession = await this.prisma.callSession.findFirst({
+    where: { compositionSid },
+    include: {
+      consultation: true,
+    },
+  });
+
+  await this.prisma.callSession.updateMany({
+    where: { compositionSid },
+    data: {
+      compositionStatus: 'started',
+      compositionStartedAt: timestamp,
+    },
+  });
+
+  if (!callSession) return;
+
+  await this.prisma.consultationNote.upsert({
+    where: { consultationId: callSession.consultationId },
+    update: {
+      doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+      aiStatus: 'COMPOSITION_STARTED',
+      aiError: null,
+    },
+    create: {
+      consultationId: callSession.consultationId,
+      doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+      aiStatus: 'COMPOSITION_STARTED',
+      aiError: null,
+    },
+  });
   }
 
   private async onCompositionAvailable(body: WebhookBody, timestamp: Date) {
-    const compositionSid = body.CompositionSid;
-    const duration = body.Duration ? Number(body.Duration) : null;
+  const compositionSid = body.CompositionSid;
+  const duration = body.Duration ? Number(body.Duration) : null;
 
-    if (!compositionSid) return;
+  if (!compositionSid) return;
 
-    const callSession = await this.prisma.callSession.findFirst({
-      where: { compositionSid },
-      include: {
-        consultation: true,
+  const callSession = await this.prisma.callSession.findFirst({
+    where: { compositionSid },
+    include: {
+      consultation: true,
+    },
+  });
+
+  if (!callSession) return;
+
+  try {
+    await this.prisma.consultationNote.upsert({
+      where: { consultationId: callSession.consultationId },
+      update: {
+        doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+        aiStatus: 'DOWNLOADING_RECORDING',
+        aiError: null,
+      },
+      create: {
+        consultationId: callSession.consultationId,
+        doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+        aiStatus: 'DOWNLOADING_RECORDING',
+        aiError: null,
       },
     });
 
-    if (!callSession) return;
+    const saved = await this.twilioService.downloadCompositionToLocal(
+      compositionSid,
+      callSession.consultationId,
+    );
 
-    try {
-      const saved = await this.twilioService.downloadCompositionToLocal(
-        compositionSid,
-        callSession.consultationId,
-      );
+    await this.prisma.$transaction([
+      this.prisma.callSession.update({
+        where: { id: callSession.id },
+        data: {
+          status: 'COMPLETED',
+          compositionStatus: 'available',
+          compositionReadyAt: timestamp,
+          mediaUrl: saved.publicUrl,
+          mediaFormat: 'mp4',
+          durationSec: duration ?? callSession.durationSec ?? undefined,
+          errorMessage: null,
+        },
+      }),
+      this.prisma.consultationNote.upsert({
+        where: { consultationId: callSession.consultationId },
+        update: {
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'MEDIA_READY',
+          aiError: null,
+        },
+        create: {
+          consultationId: callSession.consultationId,
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'MEDIA_READY',
+          aiError: null,
+        },
+      }),
+    ]);
 
-      await this.prisma.$transaction([
-        this.prisma.callSession.update({
-          where: { id: callSession.id },
-          data: {
-            status: 'COMPLETED',
-            compositionStatus: 'available',
-            compositionReadyAt: timestamp,
-            mediaUrl: saved.publicUrl,
-            mediaFormat: 'mp4',
-            durationSec: duration ?? callSession.durationSec ?? undefined,
-            errorMessage: null,
-          },
-        }),
-        this.prisma.consultationNote.upsert({
-          where: { consultationId: callSession.consultationId },
-          update: {
-            doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
-            aiStatus: 'PENDING',
-            aiError: null,
-          },
-          create: {
-            consultationId: callSession.consultationId,
-            doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
-            aiStatus: 'PENDING',
-          },
-        }),
-      ]);
+    this.runInBackground(
+      `ai-process:${callSession.consultationId}`,
+      async () => {
+        await this.aiService.processConsultationFromCallSession(
+          callSession.consultationId,
+        );
+      },
+    );
+  } catch (error: any) {
+    this.logger.error(
+      `Failed on composition-available consultationId=${callSession.consultationId} message=${error?.message || error}`,
+    );
 
-      void this.aiService
-        .processConsultationFromCallSession(callSession.consultationId)
-        .catch((err) => {
-          this.logger.error(
-            `Async AI process failed consultationId=${callSession.consultationId} message=${err?.message || err}`,
-          );
-        });
-    } catch (error: any) {
-      this.logger.error(
-        `Failed on composition-available consultationId=${callSession.consultationId} message=${error?.message || error}`,
-      );
-
-      await this.prisma.$transaction([
-        this.prisma.callSession.update({
-          where: { id: callSession.id },
-          data: {
-            status: 'FAILED',
-            errorMessage: error?.message || String(error),
-          },
-        }),
-        this.prisma.consultation.update({
-          where: { id: callSession.consultationId },
-          data: {
-            status: 'FAILED',
-          },
-        }),
-      ]);
-    }
+    await this.prisma.$transaction([
+      this.prisma.callSession.update({
+        where: { id: callSession.id },
+        data: {
+          status: 'FAILED',
+          errorMessage: error?.message || String(error),
+        },
+      }),
+      this.prisma.consultationNote.upsert({
+        where: { consultationId: callSession.consultationId },
+        update: {
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'FAILED',
+          aiError: error?.message || String(error),
+        },
+        create: {
+          consultationId: callSession.consultationId,
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'FAILED',
+          aiError: error?.message || String(error),
+        },
+      }),
+    ]);
   }
+}
 
   private async onCompositionFailed(body: WebhookBody, _timestamp: Date) {
     const compositionSid = body.CompositionSid;
@@ -350,12 +447,30 @@ export class TwilioWebhookService {
           errorMessage,
         },
       }),
-      this.prisma.consultation.update({
-        where: { id: callSession.consultationId },
-        data: {
-          status: 'FAILED',
+      this.prisma.consultationNote.upsert({
+        where: { consultationId: callSession.consultationId },
+        update: {
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'FAILED',
+          aiError: errorMessage,
+        },
+        create: {
+          consultationId: callSession.consultationId,
+          doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
+          aiStatus: 'FAILED',
+          aiError: errorMessage,
         },
       }),
     ]);
   }
+
+  private runInBackground(taskName: string, job: () => Promise<void>) {
+  setTimeout(() => {
+    void job().catch((err) => {
+      this.logger.error(
+        `[background:${taskName}] ${err?.message || err}`,
+      );
+    });
+  }, 0);
+}
 }
