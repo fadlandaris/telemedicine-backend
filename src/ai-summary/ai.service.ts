@@ -89,11 +89,13 @@ export class AiService {
     await this.prisma.consultationNote.upsert({
       where: { consultationId },
       update: {
+        doctorId: consultation.doctorId,
         aiStatus: 'PROCESSING',
         aiError: null,
       },
       create: {
         consultationId,
+        doctorId: consultation.doctorId,
         aiStatus: 'PROCESSING',
       },
     });
@@ -115,18 +117,20 @@ export class AiService {
       await this.prisma.consultationNote.upsert({
         where: { consultationId },
         update: {
+          doctorId: consultation.doctorId,
           transcriptRaw,
           aiError: null,
         },
         create: {
           consultationId,
+          doctorId: consultation.doctorId,
           transcriptRaw,
           aiStatus: 'PROCESSING',
         },
       });
 
       if (!transcriptRaw) {
-        throw new Error('Transcript kosong dari faster-whisper');
+        throw new Error('Transcript kosong dari faster-whisper, kualitas suara tidak bagus');
       }
 
       const summary =
@@ -135,6 +139,7 @@ export class AiService {
       await this.prisma.consultationNote.upsert({
         where: { consultationId },
         update: {
+          doctorId: consultation.doctorId,
           transcriptRaw,
           summary: summary.summary,
           subjective: summary.subjective,
@@ -146,6 +151,7 @@ export class AiService {
         },
         create: {
           consultationId,
+          doctorId: consultation.doctorId,
           transcriptRaw,
           summary: summary.summary,
           subjective: summary.subjective,
@@ -168,11 +174,13 @@ export class AiService {
       await this.prisma.consultationNote.upsert({
         where: { consultationId },
         update: {
+          doctorId: consultation.doctorId,
           aiStatus: 'FAILED',
           aiError: error?.message || String(error),
         },
         create: {
           consultationId,
+          doctorId: consultation.doctorId,
           aiStatus: 'FAILED',
           aiError: error?.message || String(error),
         },

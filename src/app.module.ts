@@ -8,6 +8,8 @@ import { TwilioModule } from "./twilio/twilio.module";
 import { ServeStaticModule } from "@nestjs/serve-static";
 import { join } from "path";
 import { AiModule } from "./ai-summary/ai.module";
+import { CallModule } from "./call/call.module";
+import { AiResultsModule } from "./ai-results/ai-results.module";
 
 @Module({
   imports: [
@@ -25,7 +27,9 @@ import { AiModule } from "./ai-summary/ai.module";
     AuthModule,
     ConsultationsModule,
     TwilioModule,
-    AiModule
+    AiModule,
+    CallModule,
+    AiResultsModule
   ],
 })
 export class AppModule {}

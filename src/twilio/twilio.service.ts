@@ -71,6 +71,7 @@ export class TwilioService {
 
   private upsertCallSession(params: {
     consultationId: string;
+    doctorId?: string | null;
     roomSid?: string | null;
     roomName: string;
     doctorIdentity?: string | null;
@@ -80,6 +81,7 @@ export class TwilioService {
     return this.prisma.callSession.upsert({
       where: { consultationId: params.consultationId },
       update: {
+        doctorId: params.doctorId ?? undefined,
         roomSid: params.roomSid ?? undefined,
         roomName: params.roomName,
         doctorIdentity: params.doctorIdentity ?? undefined,
@@ -88,6 +90,7 @@ export class TwilioService {
       },
       create: {
         consultationId: params.consultationId,
+        doctorId: params.doctorId ?? undefined,
         roomSid: params.roomSid ?? undefined,
         roomName: params.roomName,
         doctorIdentity: params.doctorIdentity ?? undefined,
@@ -163,6 +166,7 @@ export class TwilioService {
       }),
       this.upsertCallSession({
         consultationId: c.id,
+        doctorId: c.doctorId,
         roomSid: room.sid,
         roomName: c.roomName,
         doctorIdentity: identity,
@@ -185,7 +189,7 @@ export class TwilioService {
     this.assertJoinable(c);
 
     const digest = createHash('sha256').update(linkToken).digest('hex').slice(0, 12);
-    const identity = `guest_${c.id}_${digest}`.slice(0, 128);
+    const identity = `patient_${c.id}_${digest}`.slice(0, 128);
 
     await this.consultations.lockPatientIfNeeded(c.id, identity);
 
@@ -194,12 +198,13 @@ export class TwilioService {
 
     await this.upsertCallSession({
       consultationId: c.id,
+      doctorId: c.doctorId,
       roomSid: room.sid,
       roomName: c.roomName,
       doctorIdentity: c.doctor.twilioIdentity ?? undefined,
       patientIdentity: identity,
       recordingEnabled: true,
-    });
+    }); 
 
     return {
       token,

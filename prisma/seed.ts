@@ -9,7 +9,6 @@ const adapter = new PrismaPg({
 
 const prisma = new PrismaClient({ adapter });
 
-// dummy hash (cukup untuk testing login)
 function hashPassword(raw: string) {
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
@@ -19,23 +18,59 @@ function uniqueIdentity() {
 }
 
 async function main() {
-  // bersihin data auth dulu
+  console.log("⏳ Start seeding...");
+
   await prisma.refreshToken.deleteMany();
   await prisma.doctor.deleteMany();
 
-  // ===== akun tetap (buat test login manual) =====
-  await prisma.doctor.create({
-    data: {
-      email: "doctor@test.com",
-      passwordHash: hashPassword("Password123!"),
-      name: "Dr. Test Account",
-      phone: "081234567890",
-      twilioIdentity: "seed_doctor_test",
+  const fixedDoctors = [
+    {
+      email: "doctor1@test.com",
+      password: "Password123!",
+      name: "Dr. Test Satu",
+      phone: "081111111111",
+      twilioIdentity: "seed_doctor_1",
       isActive: true,
     },
-  });
+    {
+      email: "doctor2@test.com",
+      password: "Password123!",
+      name: "Dr. Test Dua",
+      phone: "082222222222",
+      twilioIdentity: "seed_doctor_2",
+      isActive: true,
+    },
+    {
+      email: "doctor3@test.com",
+      password: "Password123!",
+      name: "Dr. Test Tiga",
+      phone: "083333333333",
+      twilioIdentity: "seed_doctor_3",
+      isActive: true,
+    },
+    {
+      email: "doctor4@test.com",
+      password: "Password123!",
+      name: "Dr. Test Empat",
+      phone: "084444444444",
+      twilioIdentity: "seed_doctor_4",
+      isActive: true,
+    },
+  ];
 
-  // ===== 100 akun faker =====
+  for (const doctor of fixedDoctors) {
+    await prisma.doctor.create({
+      data: {
+        email: doctor.email,
+        passwordHash: hashPassword(doctor.password),
+        name: doctor.name,
+        phone: doctor.phone,
+        twilioIdentity: doctor.twilioIdentity,
+        isActive: doctor.isActive,
+      },
+    });
+  }
+
   const count = 100;
 
   for (let i = 0; i < count; i++) {
@@ -45,15 +80,18 @@ async function main() {
         passwordHash: hashPassword("Password123!"),
         name: faker.person.fullName(),
         phone: faker.phone.number(),
-        twilioIdentity: uniqueIdentity(), // wajib unik
+        twilioIdentity: uniqueIdentity(),
         isActive: true,
       },
     });
   }
 
-  console.log(`✅ Seed selesai`);
-  console.log(`✅ 1 akun test + ${count} akun faker`);
-  console.log(`✅ Login test: doctor@test.com / Password123!`);
+  console.log("✅ Seed selesai");
+  console.log("✅ 4 akun dummy tetap + 100 faker");
+  console.log("1. doctor1@test.com / Password123!");
+  console.log("2. doctor2@test.com / Password123!");
+  console.log("3. doctor3@test.com / Password123!");
+  console.log("4. doctor4@test.com / Password123!");
 }
 
 main()
