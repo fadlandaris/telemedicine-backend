@@ -19,8 +19,10 @@ model Doctor {
   isActive        Boolean   @default(true)
   emailVerifiedAt DateTime?
 
-  refreshTokens RefreshToken[]
-  consultations Consultation[]
+  refreshTokens      RefreshToken[]
+  consultations      Consultation[]
+  callSessions       CallSession[]
+  consultationNotes  ConsultationNote[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -86,6 +88,9 @@ model CallSession {
   consultationId String       @unique
   consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
 
+  doctorId String?
+  doctor   Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+
   status CallStatus @default(STARTED)
 
   roomSid         String? @unique
@@ -114,12 +119,19 @@ model CallSession {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([doctorId])
+  @@index([doctorId, createdAt(sort: Desc)])
+  @@index([consultationId])
 }
 
 model ConsultationNote {
   id             String       @id @default(uuid())
   consultationId String       @unique
   consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  doctorId String?
+  doctor   Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
 
   transcriptRaw String?
   summary       String?
@@ -138,6 +150,10 @@ model ConsultationNote {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([doctorId])
+  @@index([doctorId, createdAt(sort: Desc)])
+  @@index([consultationId])
 }
 
 model AuthAuditLog {
@@ -156,10 +172,10 @@ model AuthAuditLog {
 }
 
 enum ConsultationStatus {
-  CREATED // link dibuat
-  WAITING // pasien belum join / menunggu
-  IN_CALL // call sedang berlangsung
-  PROCESSING // rekaman diproses, transkrip/summarize
+  CREATED
+  WAITING
+  IN_CALL
+  PROCESSING
   DONE
   FAILED
   EXPIRED

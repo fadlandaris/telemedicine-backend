@@ -255,6 +255,9 @@ export class TwilioWebhookService {
 
     const callSession = await this.prisma.callSession.findFirst({
       where: { compositionSid },
+      include: {
+        consultation: true,
+      },
     });
 
     if (!callSession) return;
@@ -281,11 +284,13 @@ export class TwilioWebhookService {
         this.prisma.consultationNote.upsert({
           where: { consultationId: callSession.consultationId },
           update: {
+            doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
             aiStatus: 'PENDING',
             aiError: null,
           },
           create: {
             consultationId: callSession.consultationId,
+            doctorId: callSession.doctorId ?? callSession.consultation.doctorId,
             aiStatus: 'PENDING',
           },
         }),
@@ -327,8 +332,11 @@ export class TwilioWebhookService {
 
     if (!compositionSid) return;
 
-    const callSession = await this.prisma.callSession.findFirst({
+   const callSession = await this.prisma.callSession.findFirst({
       where: { compositionSid },
+      include: {
+        consultation: true,
+      },
     });
 
     if (!callSession) return;
