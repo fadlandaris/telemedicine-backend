@@ -14,6 +14,8 @@ ENV WHISPER_SCRIPT_PATH=/app/scripts/transcribe.py
 RUN python3 -m pip install --no-cache-dir --upgrade pip \
     && python3 -m pip install --no-cache-dir faster-whisper
 
+RUN python3 -c "import faster_whisper; print('faster-whisper ok')"
+
 WORKDIR /app
 
 COPY package.json bun.lock ./
