@@ -18,4 +18,4 @@ RUN bun run build
 
 EXPOSE 4000
 
-CMD ["sh", "-c", "bunx prisma migrate deploy && bun run start:prod"]
+CMD ["sh", "-c", "bunx prisma migrate deploy && node dist/main.js"]
