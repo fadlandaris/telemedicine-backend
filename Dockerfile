@@ -13,12 +13,21 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 ENV WHISPER_PYTHON_BIN=/opt/venv/bin/python
 ENV WHISPER_SCRIPT_PATH=/app/scripts/transcribe.py
+ENV HF_HOME=/app/.cache/huggingface
 
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/python -m pip install --no-cache-dir --upgrade pip \
     && /opt/venv/bin/python -m pip install --no-cache-dir faster-whisper
 
 RUN /opt/venv/bin/python -c "import faster_whisper; print('faster-whisper ok')"
+
+# Pre-download Whisper model at build time for stable runtime
+RUN mkdir -p /app/.cache/huggingface \
+    && /opt/venv/bin/python - <<'PY'
+from faster_whisper import WhisperModel
+WhisperModel("small", device="cpu", compute_type="int8")
+print("whisper model cached")
+PY
 
 WORKDIR /app
 
