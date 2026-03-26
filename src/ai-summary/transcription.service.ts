@@ -76,9 +76,14 @@ export class TranscriptionService {
         typeof error?.stderr === 'string' ? error.stderr.trim() : '';
       const stdout =
         typeof error?.stdout === 'string' ? error.stdout.trim() : '';
+      const code = error?.code ? `code=${error.code}` : '';
+      const signal = error?.signal ? `signal=${error.signal}` : '';
+      const meta = [code, signal].filter(Boolean).join(' ');
 
       throw new InternalServerErrorException(
         `Whisper transcription failed: ${error?.message || String(error)}${
+          meta ? ` (${meta})` : ''
+        }${
           stderr ? `\n${stderr}` : ''
         }${stdout ? `\n${stdout}` : ''}`,
       );
