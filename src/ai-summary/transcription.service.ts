@@ -25,7 +25,11 @@ export class TranscriptionService {
   private readonly logger = new Logger(TranscriptionService.name);
 
   async transcribeWithWhisper(audioPath: string): Promise<TranscriptionResult> {
-    const pythonBin = process.env.WHISPER_PYTHON_BIN || 'python';
+    const venvPython = '/opt/venv/bin/python';
+    const envPython = process.env.WHISPER_PYTHON_BIN;
+    const pythonBin = existsSync(venvPython)
+      ? venvPython
+      : (envPython && existsSync(envPython) && envPython) || 'python';
     const scriptPath =
       process.env.WHISPER_SCRIPT_PATH ||
       resolve(process.cwd(), 'scripts', 'transcribe.py');
@@ -68,8 +72,15 @@ export class TranscriptionService {
         segments: Array.isArray(parsed?.segments) ? parsed.segments : [],
       };
     } catch (error: any) {
+      const stderr =
+        typeof error?.stderr === 'string' ? error.stderr.trim() : '';
+      const stdout =
+        typeof error?.stdout === 'string' ? error.stdout.trim() : '';
+
       throw new InternalServerErrorException(
-        `Whisper transcription failed: ${error?.message || String(error)}`,
+        `Whisper transcription failed: ${error?.message || String(error)}${
+          stderr ? `\n${stderr}` : ''
+        }${stdout ? `\n${stdout}` : ''}`,
       );
     }
   }
