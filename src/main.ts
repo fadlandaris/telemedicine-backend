@@ -12,10 +12,13 @@ async function bootstrap() {
   app.use(express.urlencoded({ extended: true }));
   app.use(express.json());
 
-  app.enableCors({
-    origin: 'http://localhost:3000',
-    credentials: true,
-  });
+ app.enableCors({
+  origin: [
+    'http://localhost:3000',
+    process.env.APP_PUBLIC_BASE_URL,
+  ],
+  credentials: true,
+});
 
   app.useGlobalPipes(
     new ValidationPipe({
