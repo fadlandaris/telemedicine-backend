@@ -4,11 +4,17 @@ import { TranscriptionService } from './transcription.service';
 import { SummaryService } from './summary.service';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from 'ffmpeg-static';
-import { promises as fs } from 'fs';
+import { promises as fs, existsSync } from 'fs';
 import { basename, extname, join } from 'path';
 
-if (ffmpegPath) {
-  ffmpeg.setFfmpegPath(ffmpegPath);
+const envFfmpegPath = process.env.FFMPEG_PATH?.trim();
+const resolvedFfmpegPath =
+  (envFfmpegPath && existsSync(envFfmpegPath) && envFfmpegPath) ||
+  (ffmpegPath && existsSync(ffmpegPath) && ffmpegPath) ||
+  null;
+
+if (resolvedFfmpegPath) {
+  ffmpeg.setFfmpegPath(resolvedFfmpegPath);
 }
 
 @Injectable()

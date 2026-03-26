@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+ENV FFMPEG_PATH=/usr/bin/ffmpeg
+
 WORKDIR /app
 
 COPY package.json bun.lock ./
