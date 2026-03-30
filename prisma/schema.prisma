@@ -6,7 +6,6 @@ datasource db {
   provider = "postgresql"
 }
 
-// main pull from staging
 model Doctor {
   id           String  @id @default(uuid())
   email        String  @unique
@@ -66,6 +65,7 @@ model Consultation {
   status    ConsultationStatus @default(CREATED)
   expiresAt DateTime?
 
+  patientName String?
   patientIdentity String?
   patientJoinedAt DateTime?
 
@@ -78,6 +78,7 @@ model Consultation {
 
   callSession      CallSession?
   consultationNote ConsultationNote?
+  
 
   @@index([doctorId])
   @@index([status])
@@ -98,7 +99,8 @@ model CallSession {
   roomName        String?
   doctorIdentity  String?
   patientIdentity String?
-
+  patientName String?
+  
   startedAt DateTime?
   endedAt   DateTime?
 
