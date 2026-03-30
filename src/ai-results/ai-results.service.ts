@@ -104,6 +104,14 @@ export class AiResultsService {
               },
               {
                 consultation: {
+                  patientName: {
+                    contains: search,
+                    mode: 'insensitive',
+                  },
+                },
+              },
+              {
+                consultation: {
                   doctor: {
                     name: {
                       contains: search,
@@ -164,6 +172,8 @@ export class AiResultsService {
                 status: true,
                 roomSid: true,
                 roomName: true,
+                patientIdentity: true,
+                patientName: true,
                 createdAt: true,
               },
             },
@@ -177,41 +187,50 @@ export class AiResultsService {
     const nextCursor = hasMore ? items[items.length - 1].id : null;
 
     return {
-      data: items.map((item) => ({
-        id: item.id,
-        consultationId: item.consultationId,
-        doctorId: item.doctorId,
-        doctorName: item.consultation.doctor?.name ?? null,
-        roomName: item.consultation.roomName,
-        patientName: item.consultation.patientName ?? null,
-        patientIdentity: item.consultation.patientIdentity,
-        consultationStatus: item.consultation.status,
-        consultationStartedAt: item.consultation.startedAt,
-        consultationEndedAt: item.consultation.endedAt,
-        summary: item.summary,
-        subjective: item.subjective,
-        objective: item.objective,
-        assessment: item.assessment,
-        plan: item.plan,
-        transcriptRaw: item.transcriptRaw,
-        aiStatus: item.aiStatus,
-        aiError: item.aiError,
-        transcribedAt: item.transcribedAt,
-        summarizedAt: item.summarizedAt,
-        aiModel: item.aiModel,
-        callSession: item.consultation.callSession
-          ? {
-              id: item.consultation.callSession.id,
-              durationSec: item.consultation.callSession.durationSec,
-              status: item.consultation.callSession.status,
-              roomSid: item.consultation.callSession.roomSid,
-              roomName: item.consultation.callSession.roomName,
-              createdAt: item.consultation.callSession.createdAt,
-            }
-          : null,
-        createdAt: item.createdAt,
-        updatedAt: item.updatedAt,
-      })),
+      data: items.map((item) => {
+        const patientName =
+          item.consultation.patientName ??
+          item.consultation.callSession?.patientName ??
+          null;
+
+        return {
+          id: item.id,
+          consultationId: item.consultationId,
+          doctorId: item.doctorId,
+          doctorName: item.consultation.doctor?.name ?? null,
+          roomName: item.consultation.roomName,
+          patientIdentity: item.consultation.patientIdentity,
+          patientName,
+          consultationStatus: item.consultation.status,
+          consultationStartedAt: item.consultation.startedAt,
+          consultationEndedAt: item.consultation.endedAt,
+          summary: item.summary,
+          subjective: item.subjective,
+          objective: item.objective,
+          assessment: item.assessment,
+          plan: item.plan,
+          transcriptRaw: item.transcriptRaw,
+          aiStatus: item.aiStatus,
+          aiError: item.aiError,
+          transcribedAt: item.transcribedAt,
+          summarizedAt: item.summarizedAt,
+          aiModel: item.aiModel,
+          callSession: item.consultation.callSession
+            ? {
+                id: item.consultation.callSession.id,
+                durationSec: item.consultation.callSession.durationSec,
+                status: item.consultation.callSession.status,
+                roomSid: item.consultation.callSession.roomSid,
+                roomName: item.consultation.callSession.roomName,
+                patientIdentity: item.consultation.callSession.patientIdentity,
+                patientName: item.consultation.callSession.patientName ?? null,
+                createdAt: item.consultation.callSession.createdAt,
+              }
+            : null,
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt,
+        };
+      }),
       pagination: {
         limit,
         nextCursor,
@@ -236,6 +255,7 @@ export class AiResultsService {
             roomName: true,
             patientName: true,
             patientIdentity: true,
+            patientName: true,
             startedAt: true,
             endedAt: true,
             doctor: {
@@ -252,6 +272,7 @@ export class AiResultsService {
                 roomName: true,
                 doctorIdentity: true,
                 patientIdentity: true,
+                patientName: true,
                 startedAt: true,
                 endedAt: true,
                 recordingStatus: true,
@@ -273,14 +294,19 @@ export class AiResultsService {
       throw new NotFoundException('AI summary tidak ditemukan');
     }
 
+    const patientName =
+      note.consultation.patientName ??
+      note.consultation.callSession?.patientName ??
+      null;
+
     return {
       id: note.id,
       consultationId: note.consultationId,
       doctorId: note.doctorId,
       doctorName: note.consultation.doctor?.name ?? null,
       roomName: note.consultation.roomName,
-      patientName: note.consultation.patientName ?? null,
       patientIdentity: note.consultation.patientIdentity,
+      patientName,
       consultationStatus: note.consultation.status,
       consultationStartedAt: note.consultation.startedAt,
       consultationEndedAt: note.consultation.endedAt,

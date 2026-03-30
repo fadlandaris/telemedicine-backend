@@ -41,9 +41,8 @@ export class ConsultationsService {
     const linkToken = base64Url(randomBytes(24));
     const roomName = await this.generateUniqueRoomName();
 
-    const expiresAt = dto.expiresInMinutes
-      ? new Date(Date.now() + dto.expiresInMinutes * 60_000)
-      : null;
+    const expiresInMinutes = dto.expiresInMinutes ?? 60;
+    const expiresAt = new Date(Date.now() + expiresInMinutes * 60_000);
 
     return this.prisma.consultation.create({
       data: {
@@ -93,27 +92,35 @@ export class ConsultationsService {
     return c;
   }
 
-  async lockPatientIfNeeded(consultationId: string, patientIdentity: string) {
-    const c = await this.prisma.consultation.findUnique({
-      where: { id: consultationId },
-    });
+  async lockPatientIfNeeded(
+  consultationId: string,
+  patientIdentity: string,
+  patientName: string,
+) {
+  const c = await this.prisma.consultation.findUnique({
+    where: { id: consultationId },
+  });
 
-    if (!c) throw new NotFoundException();
+  if (!c) throw new NotFoundException();
 
-    if (c.patientIdentity && c.patientIdentity !== patientIdentity) {
-      throw new ForbiddenException('Link sudah dipakai pasien lain');
-    }
-
-    if (!c.patientIdentity) {
-      await this.prisma.consultation.update({
-        where: { id: consultationId },
-        data: {
-          patientIdentity,
-          status: c.status === 'CREATED' ? 'WAITING' : c.status,
-        },
-      });
-    }
+  if (c.patientIdentity && c.patientIdentity !== patientIdentity) {
+    throw new ForbiddenException('Link sudah dipakai pasien lain');
   }
+
+  const shouldSetIdentity = !c.patientIdentity;
+  const shouldSetName = !c.patientName;
+
+  if (shouldSetIdentity || shouldSetName || c.status === 'CREATED') {
+    await this.prisma.consultation.update({
+      where: { id: consultationId },
+      data: {
+        ...(shouldSetIdentity ? { patientIdentity } : {}),
+        ...(shouldSetName ? { patientName } : {}),
+        ...(c.status === 'CREATED' ? { status: 'WAITING' } : {}),
+      },
+    });
+  }
+}
 
   async endConsultation(doctorId: string, consultationId: string) {
     return this.twilioService.completeConsultationRoom(consultationId, doctorId);

@@ -174,6 +174,7 @@ export class TwilioService {
         roomName: c.roomName,
         doctorIdentity: identity,
         patientIdentity: c.patientIdentity,
+        patientName: c.patientName,
         recordingEnabled: true,
       }),
     ]);
@@ -194,9 +195,9 @@ export class TwilioService {
     const digest = createHash('sha256').update(linkToken).digest('hex').slice(0, 12);
     const identity = `patient_${c.id}_${digest}`.slice(0, 128);
     const normalizedName = displayName.trim().slice(0, 50);
-    const patientName = normalizedName || c.patientName || null;
+    const patientName = normalizedName;
 
-    await this.consultations.lockPatientIfNeeded(c.id, identity);
+    await this.consultations.lockPatientIfNeeded(c.id, identity, patientName);
 
     if (patientName && patientName !== c.patientName) {
       await this.prisma.consultation.update({
