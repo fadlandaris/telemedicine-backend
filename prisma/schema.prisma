@@ -6,7 +6,7 @@ datasource db {
   provider = "postgresql"
 }
 
-// test staging
+// main pull from staging
 model Doctor {
   id           String  @id @default(uuid())
   email        String  @unique
