@@ -4,9 +4,9 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
+// test staging
 model Doctor {
   id           String  @id @default(uuid())
   email        String  @unique
