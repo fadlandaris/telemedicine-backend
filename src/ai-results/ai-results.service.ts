@@ -255,7 +255,6 @@ export class AiResultsService {
             roomName: true,
             patientName: true,
             patientIdentity: true,
-            patientName: true,
             startedAt: true,
             endedAt: true,
             doctor: {
