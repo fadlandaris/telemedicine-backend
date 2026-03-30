@@ -76,6 +76,7 @@ export class TwilioService {
     roomName: string;
     doctorIdentity?: string | null;
     patientIdentity?: string | null;
+    patientName?: string | null;
     recordingEnabled?: boolean;
   }) {
     return this.prisma.callSession.upsert({
@@ -86,6 +87,7 @@ export class TwilioService {
         roomName: params.roomName,
         doctorIdentity: params.doctorIdentity ?? undefined,
         patientIdentity: params.patientIdentity ?? undefined,
+        patientName: params.patientName ?? undefined,
         recordingEnabled: params.recordingEnabled ?? true,
       },
       create: {
@@ -95,6 +97,7 @@ export class TwilioService {
         roomName: params.roomName,
         doctorIdentity: params.doctorIdentity ?? undefined,
         patientIdentity: params.patientIdentity ?? undefined,
+        patientName: params.patientName ?? undefined,
         recordingEnabled: params.recordingEnabled ?? true,
         status: 'STARTED',
       },
@@ -171,6 +174,7 @@ export class TwilioService {
         roomName: c.roomName,
         doctorIdentity: identity,
         patientIdentity: c.patientIdentity,
+        patientName: c.patientName,
         recordingEnabled: true,
       }),
     ]);
@@ -191,7 +195,13 @@ export class TwilioService {
     const digest = createHash('sha256').update(linkToken).digest('hex').slice(0, 12);
     const identity = `patient_${c.id}_${digest}`.slice(0, 128);
 
-    await this.consultations.lockPatientIfNeeded(c.id, identity);
+    const normalizedPatientName = displayName.trim().slice(0, 50);
+
+    await this.consultations.lockPatientIfNeeded(
+      c.id,
+      identity,
+      normalizedPatientName,
+    );
 
     const room = await this.ensureRoomAndPersistSid(c.id, c.roomName);
     const token = this.generateVideoJwt(identity, c.roomName);
@@ -203,6 +213,7 @@ export class TwilioService {
       roomName: c.roomName,
       doctorIdentity: c.doctor.twilioIdentity ?? undefined,
       patientIdentity: identity,
+      patientName: normalizedPatientName,
       recordingEnabled: true,
     }); 
 
@@ -212,7 +223,7 @@ export class TwilioService {
       identity,
       consultationId: c.id,
       doctorName: c.doctor.name ?? 'Doctor',
-      displayName: displayName.trim().slice(0, 50),
+      displayName: normalizedPatientName,
     };
   }
 
