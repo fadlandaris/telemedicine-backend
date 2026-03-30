@@ -155,8 +155,8 @@ export class AiResultsService {
             id: true,
             status: true,
             roomName: true,
-            patientIdentity: true,
             patientName: true,
+            patientIdentity: true,
             startedAt: true,
             endedAt: true,
             doctor: {
@@ -253,8 +253,8 @@ export class AiResultsService {
             id: true,
             status: true,
             roomName: true,
-            patientIdentity: true,
             patientName: true,
+            patientIdentity: true,
             startedAt: true,
             endedAt: true,
             doctor: {

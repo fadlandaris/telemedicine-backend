@@ -194,14 +194,17 @@ export class TwilioService {
 
     const digest = createHash('sha256').update(linkToken).digest('hex').slice(0, 12);
     const identity = `patient_${c.id}_${digest}`.slice(0, 128);
+    const normalizedName = displayName.trim().slice(0, 50);
+    const patientName = normalizedName;
 
-    const normalizedPatientName = displayName.trim().slice(0, 50);
+    await this.consultations.lockPatientIfNeeded(c.id, identity, patientName);
 
-    await this.consultations.lockPatientIfNeeded(
-      c.id,
-      identity,
-      normalizedPatientName,
-    );
+    if (patientName && patientName !== c.patientName) {
+      await this.prisma.consultation.update({
+        where: { id: c.id },
+        data: { patientName },
+      });
+    }
 
     const room = await this.ensureRoomAndPersistSid(c.id, c.roomName);
     const token = this.generateVideoJwt(identity, c.roomName);
@@ -213,7 +216,7 @@ export class TwilioService {
       roomName: c.roomName,
       doctorIdentity: c.doctor.twilioIdentity ?? undefined,
       patientIdentity: identity,
-      patientName: normalizedPatientName,
+      patientName,
       recordingEnabled: true,
     }); 
 
@@ -223,7 +226,7 @@ export class TwilioService {
       identity,
       consultationId: c.id,
       doctorName: c.doctor.name ?? 'Doctor',
-      displayName: normalizedPatientName,
+      displayName: normalizedName,
     };
   }
 

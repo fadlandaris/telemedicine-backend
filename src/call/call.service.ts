@@ -150,7 +150,7 @@ export class CallService {
         consultationId: item.consultationId,
         doctorId: item.doctorId,
         doctorName: item.consultation.doctor?.name ?? null,
-        patientName: item.consultation.patientName ?? null,
+        patientName: item.patientName ?? item.consultation.patientName ?? null,
         status: item.status,
         roomSid: item.roomSid,
         roomName: item.roomName,
