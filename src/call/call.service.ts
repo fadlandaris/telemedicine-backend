@@ -69,6 +69,20 @@ export class CallService {
                 },
               },
               {
+                patientName: {
+                  contains: search,
+                  mode: 'insensitive',
+                },
+              },
+              {
+                consultation: {
+                  patientName: {
+                    contains: search,
+                    mode: 'insensitive',
+                  },
+                },
+              },
+              {
                 consultation: {
                   doctor: {
                     name: {
@@ -114,6 +128,7 @@ export class CallService {
             status: true,
             startedAt: true,
             endedAt: true,
+            patientName: true,
             doctor: {
               select: {
                 id: true,
@@ -135,6 +150,7 @@ export class CallService {
         consultationId: item.consultationId,
         doctorId: item.doctorId,
         doctorName: item.consultation.doctor?.name ?? null,
+        patientName: item.consultation.patientName ?? null,
         status: item.status,
         roomSid: item.roomSid,
         roomName: item.roomName,

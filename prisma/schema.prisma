@@ -65,6 +65,7 @@ model Consultation {
   status    ConsultationStatus @default(CREATED)
   expiresAt DateTime?
 
+  patientName String?
   patientIdentity String?
   patientJoinedAt DateTime?
 
@@ -77,6 +78,7 @@ model Consultation {
 
   callSession      CallSession?
   consultationNote ConsultationNote?
+  
 
   @@index([doctorId])
   @@index([status])
@@ -97,7 +99,8 @@ model CallSession {
   roomName        String?
   doctorIdentity  String?
   patientIdentity String?
-
+  patientName String?
+  
   startedAt DateTime?
   endedAt   DateTime?
 

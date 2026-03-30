@@ -1,5 +1,6 @@
 import { IsIn, IsOptional, IsString } from 'class-validator';
 
+//test dto ai
 export class GetAiResultsQueryDto {
   @IsOptional()
   @IsString()

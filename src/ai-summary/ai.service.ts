@@ -4,11 +4,17 @@ import { TranscriptionService } from './transcription.service';
 import { SummaryService } from './summary.service';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from 'ffmpeg-static';
-import { promises as fs } from 'fs';
+import { promises as fs, existsSync } from 'fs';
 import { basename, extname, join } from 'path';
 
-if (ffmpegPath) {
-  ffmpeg.setFfmpegPath(ffmpegPath);
+const envFfmpegPath = process.env.FFMPEG_PATH?.trim();
+const resolvedFfmpegPath =
+  (envFfmpegPath && existsSync(envFfmpegPath) && envFfmpegPath) ||
+  (ffmpegPath && existsSync(ffmpegPath) && ffmpegPath) ||
+  null;
+
+if (resolvedFfmpegPath) {
+  ffmpeg.setFfmpegPath(resolvedFfmpegPath);
 }
 
 @Injectable()
@@ -67,130 +73,138 @@ export class AiService {
     }
   }
 
-  async processConsultationFromCallSession(consultationId: string) {
-    const consultation = await this.prisma.consultation.findUnique({
-      where: { id: consultationId },
-      include: {
-        callSession: true,
-        consultationNote: true,
+ async processConsultationFromCallSession(consultationId: string) {
+  const consultation = await this.prisma.consultation.findUnique({
+    where: { id: consultationId },
+    include: {
+      callSession: true,
+      consultationNote: true,
+    },
+  });
+
+  if (!consultation) {
+    throw new Error(`Consultation not found: ${consultationId}`);
+  }
+
+  if (!consultation.callSession?.mediaUrl) {
+    throw new Error(
+      `CallSession.mediaUrl not found for consultation ${consultationId}`,
+    );
+  }
+
+  const upsertStatus = async (
+    aiStatus: string,
+    extra: Record<string, any> = {},
+  ) => {
+    await this.prisma.consultationNote.upsert({
+      where: { consultationId },
+      update: {
+        doctorId: consultation.doctorId,
+        aiStatus,
+        aiError: null,
+        ...extra,
+      },
+      create: {
+        consultationId,
+        doctorId: consultation.doctorId,
+        aiStatus,
+        aiError: null,
+        ...extra,
       },
     });
+  };
 
-    if (!consultation) {
-      throw new Error(`Consultation not found: ${consultationId}`);
-    }
+  let audioPath: string | null = null;
 
-    if (!consultation.callSession?.mediaUrl) {
+  try {
+    await upsertStatus('IN_PROGRESS');
+
+    const mp4Path = this.resolveLocalPathFromPublicUrl(
+      consultation.callSession.mediaUrl,
+    );
+
+    await upsertStatus('EXTRACTING_AUDIO');
+
+    audioPath = await this.extractAudioFromMp4(mp4Path);
+
+    await upsertStatus('TRANSCRIBING');
+
+    const transcription =
+      await this.transcriptionService.transcribeWithWhisper(audioPath);
+
+    const transcriptRaw = String(transcription.text || '').trim();
+
+    await upsertStatus('TRANSCRIPTION_READY', {
+      transcriptRaw,
+    });
+
+    if (!transcriptRaw) {
       throw new Error(
-        `CallSession.mediaUrl not found for consultation ${consultationId}`,
+        'Transcript kosong dari faster-whisper, kualitas suara tidak bagus',
       );
     }
+
+    await upsertStatus('SUMMARIZING', {
+      transcriptRaw,
+    });
+
+    const summary = await this.summaryService.createMedicalSummary(transcriptRaw);
 
     await this.prisma.consultationNote.upsert({
       where: { consultationId },
       update: {
         doctorId: consultation.doctorId,
-        aiStatus: 'PROCESSING',
+        transcriptRaw,
+        summary: summary.summary,
+        subjective: summary.subjective,
+        objective: summary.objective,
+        assessment: summary.assessment,
+        plan: summary.plan,
+        aiStatus: 'SUCCESS',
         aiError: null,
       },
       create: {
         consultationId,
         doctorId: consultation.doctorId,
-        aiStatus: 'PROCESSING',
+        transcriptRaw,
+        summary: summary.summary,
+        subjective: summary.subjective,
+        objective: summary.objective,
+        assessment: summary.assessment,
+        plan: summary.plan,
+        aiStatus: 'SUCCESS',
+        aiError: null,
       },
     });
 
-    let audioPath: string | null = null;
+    this.logger.log(
+      `AI pipeline completed for consultationId=${consultationId}`,
+    );
+  } catch (error: any) {
+    this.logger.error(
+      `AI pipeline failed consultationId=${consultationId} message=${error?.message || error}`,
+    );
 
-    try {
-      const mp4Path = this.resolveLocalPathFromPublicUrl(
-        consultation.callSession.mediaUrl,
-      );
+    await this.prisma.consultationNote.upsert({
+      where: { consultationId },
+      update: {
+        doctorId: consultation.doctorId,
+        aiStatus: 'FAILED',
+        aiError: error?.message || String(error),
+      },
+      create: {
+        consultationId,
+        doctorId: consultation.doctorId,
+        aiStatus: 'FAILED',
+        aiError: error?.message || String(error),
+      },
+    });
 
-      audioPath = await this.extractAudioFromMp4(mp4Path);
-
-      const transcription =
-        await this.transcriptionService.transcribeWithWhisper(audioPath);
-
-      const transcriptRaw = String(transcription.text || '').trim();
-
-      await this.prisma.consultationNote.upsert({
-        where: { consultationId },
-        update: {
-          doctorId: consultation.doctorId,
-          transcriptRaw,
-          aiError: null,
-        },
-        create: {
-          consultationId,
-          doctorId: consultation.doctorId,
-          transcriptRaw,
-          aiStatus: 'PROCESSING',
-        },
-      });
-
-      if (!transcriptRaw) {
-        throw new Error('Transcript kosong dari faster-whisper, kualitas suara tidak bagus');
-      }
-
-      const summary =
-        await this.summaryService.createMedicalSummary(transcriptRaw);
-
-      await this.prisma.consultationNote.upsert({
-        where: { consultationId },
-        update: {
-          doctorId: consultation.doctorId,
-          transcriptRaw,
-          summary: summary.summary,
-          subjective: summary.subjective,
-          objective: summary.objective,
-          assessment: summary.assessment,
-          plan: summary.plan,
-          aiStatus: 'COMPLETED',
-          aiError: null,
-        },
-        create: {
-          consultationId,
-          doctorId: consultation.doctorId,
-          transcriptRaw,
-          summary: summary.summary,
-          subjective: summary.subjective,
-          objective: summary.objective,
-          assessment: summary.assessment,
-          plan: summary.plan,
-          aiStatus: 'COMPLETED',
-          aiError: null,
-        },
-      });
-
-      this.logger.log(
-        `AI pipeline completed for consultationId=${consultationId}`,
-      );
-    } catch (error: any) {
-      this.logger.error(
-        `AI pipeline failed consultationId=${consultationId} message=${error?.message || error}`,
-      );
-
-      await this.prisma.consultationNote.upsert({
-        where: { consultationId },
-        update: {
-          doctorId: consultation.doctorId,
-          aiStatus: 'FAILED',
-          aiError: error?.message || String(error),
-        },
-        create: {
-          consultationId,
-          doctorId: consultation.doctorId,
-          aiStatus: 'FAILED',
-          aiError: error?.message || String(error),
-        },
-      });
-
-      throw error;
-    } finally {
-      if (audioPath) {
-        await this.removeFileIfExists(audioPath);
-      }
+    throw error;
+  } finally {
+    if (audioPath) {
+      await this.removeFileIfExists(audioPath);
     }
   }
+}
 }

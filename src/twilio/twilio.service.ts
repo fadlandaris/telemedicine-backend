@@ -76,6 +76,7 @@ export class TwilioService {
     roomName: string;
     doctorIdentity?: string | null;
     patientIdentity?: string | null;
+    patientName?: string | null;
     recordingEnabled?: boolean;
   }) {
     return this.prisma.callSession.upsert({
@@ -86,6 +87,7 @@ export class TwilioService {
         roomName: params.roomName,
         doctorIdentity: params.doctorIdentity ?? undefined,
         patientIdentity: params.patientIdentity ?? undefined,
+        patientName: params.patientName ?? undefined,
         recordingEnabled: params.recordingEnabled ?? true,
       },
       create: {
@@ -95,6 +97,7 @@ export class TwilioService {
         roomName: params.roomName,
         doctorIdentity: params.doctorIdentity ?? undefined,
         patientIdentity: params.patientIdentity ?? undefined,
+        patientName: params.patientName ?? undefined,
         recordingEnabled: params.recordingEnabled ?? true,
         status: 'STARTED',
       },
@@ -171,6 +174,7 @@ export class TwilioService {
         roomName: c.roomName,
         doctorIdentity: identity,
         patientIdentity: c.patientIdentity,
+        patientName: c.patientName,
         recordingEnabled: true,
       }),
     ]);
@@ -191,7 +195,13 @@ export class TwilioService {
     const digest = createHash('sha256').update(linkToken).digest('hex').slice(0, 12);
     const identity = `patient_${c.id}_${digest}`.slice(0, 128);
 
-    await this.consultations.lockPatientIfNeeded(c.id, identity);
+    const normalizedPatientName = displayName.trim().slice(0, 50);
+
+    await this.consultations.lockPatientIfNeeded(
+      c.id,
+      identity,
+      normalizedPatientName,
+    );
 
     const room = await this.ensureRoomAndPersistSid(c.id, c.roomName);
     const token = this.generateVideoJwt(identity, c.roomName);
@@ -203,6 +213,7 @@ export class TwilioService {
       roomName: c.roomName,
       doctorIdentity: c.doctor.twilioIdentity ?? undefined,
       patientIdentity: identity,
+      patientName: normalizedPatientName,
       recordingEnabled: true,
     }); 
 
@@ -212,68 +223,82 @@ export class TwilioService {
       identity,
       consultationId: c.id,
       doctorName: c.doctor.name ?? 'Doctor',
-      displayName: displayName.trim().slice(0, 50),
+      displayName: normalizedPatientName,
     };
   }
 
   async completeConsultationRoom(consultationId: string, doctorId: string) {
-    const consultation = await this.prisma.consultation.findUnique({
-      where: { id: consultationId },
-      include: {
-        doctor: true,
-        callSession: true,
-      },
-    });
-
-    if (!consultation) {
-      throw new NotFoundException('Consultation tidak ditemukan');
-    }
-
-    if (consultation.doctorId !== doctorId) {
-      throw new ForbiddenException('Bukan milik dokter ini');
-    }
-
-    if (!consultation.twilioRoomSid) {
-      throw new BadRequestException('Twilio room SID belum ada');
-    }
-
-    if (['DONE', 'FAILED', 'EXPIRED'].includes(consultation.status)) {
-      throw new BadRequestException('Consultation sudah selesai');
-    }
-
-    try {
-      await this.client.video.v1.rooms(consultation.twilioRoomSid).update({
-        status: 'completed',
+      const consultation = await this.prisma.consultation.findUnique({
+        where: { id: consultationId },
+        include: {
+          doctor: true,
+          callSession: true,
+        },
       });
-    } catch (error: any) {
-      // kalau sudah completed di Twilio, lanjutkan update DB lokal
-      this.logger.warn(
-        `complete room warning consultationId=${consultationId} message=${error?.message}`,
-      );
-    }
 
-    await this.prisma.$transaction([
-      this.prisma.consultation.update({
-        where: { id: consultation.id },
-        data: {
-          status: 'PROCESSING',
-          endedAt: consultation.endedAt ?? new Date(),
-        },
-      }),
-      this.prisma.callSession.updateMany({
-        where: { consultationId: consultation.id },
-        data: {
-          endedAt: new Date(),
-        },
-      }),
-    ]);
+      if (!consultation) {
+        throw new NotFoundException('Consultation tidak ditemukan');
+      }
 
-    return {
-      success: true,
-      consultationId: consultation.id,
-      roomSid: consultation.twilioRoomSid,
-      status: 'PROCESSING',
-    };
+      if (consultation.doctorId !== doctorId) {
+        throw new ForbiddenException('Bukan milik dokter ini');
+      }
+
+      if (!consultation.twilioRoomSid) {
+        throw new BadRequestException('Twilio room SID belum ada');
+      }
+
+      if (['DONE', 'FAILED', 'EXPIRED'].includes(consultation.status)) {
+        throw new BadRequestException('Consultation sudah selesai');
+      }
+
+      try {
+        await this.client.video.v1.rooms(consultation.twilioRoomSid).update({
+          status: 'completed',
+        });
+      } catch (error: any) {
+        this.logger.warn(
+          `complete room warning consultationId=${consultationId} message=${error?.message}`,
+        );
+      }
+
+      await this.prisma.$transaction([
+        this.prisma.consultation.update({
+          where: { id: consultation.id },
+          data: {
+            status: 'DONE',
+            endedAt: consultation.endedAt ?? new Date(),
+          },
+        }),
+        this.prisma.callSession.updateMany({
+          where: { consultationId: consultation.id },
+          data: {
+            endedAt: new Date(),
+          },
+        }),
+        this.prisma.consultationNote.upsert({
+          where: { consultationId: consultation.id },
+          update: {
+            doctorId: consultation.doctorId,
+            aiStatus: 'PENDING',
+            aiError: null,
+          },
+          create: {
+            consultationId: consultation.id,
+            doctorId: consultation.doctorId,
+            aiStatus: 'PENDING',
+            aiError: null,
+          },
+        }),
+      ]);
+
+      return {
+        success: true,
+        consultationId: consultation.id,
+        roomSid: consultation.twilioRoomSid,
+        status: 'DONE',
+        aiStatus: 'PENDING',
+      };
   }
 
   async listRecordingsByRoomSid(roomSid: string) {
