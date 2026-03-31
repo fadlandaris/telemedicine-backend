@@ -1,4 +1,4 @@
-import { IsString, Length } from "class-validator";
+import { IsOptional, IsString, Length } from "class-validator";
 
 export class DoctorVideoTokenDto {
   @IsString()
@@ -12,4 +12,9 @@ export class GuestVideoTokenDto {
   @IsString()
   @Length(1, 50)
   displayName: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  clientIp?: string;
 }

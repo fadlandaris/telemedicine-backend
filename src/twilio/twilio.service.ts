@@ -37,6 +37,123 @@ export class TwilioService {
     });
   }
 
+  private normalizeClientIp(ip?: string | null): string | null {
+    if (!ip || typeof ip !== 'string') return null;
+
+    let value = ip.trim();
+    if (!value) return null;
+
+    if (value.startsWith('::ffff:')) {
+      value = value.slice(7);
+    }
+
+    if (value.includes('.') && value.includes(':')) {
+      value = value.split(':')[0];
+    }
+
+    if (this.isPrivateIp(value)) return null;
+
+    return value;
+  }
+
+  private isPrivateIp(ip: string): boolean {
+    if (!ip) return true;
+
+    if (ip === '::1' || ip.startsWith('fe80:') || ip.startsWith('fd') || ip.startsWith('fc')) {
+      return true;
+    }
+
+    if (ip.startsWith('127.')) return true;
+    if (ip.startsWith('10.')) return true;
+    if (ip.startsWith('192.168.')) return true;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return true;
+
+    return false;
+  }
+
+  private hasPatientLocation(c: any): boolean {
+    return !!(
+      c?.patientCity ||
+      c?.patientProvince ||
+      c?.patientCountry ||
+      c?.patientCountryCode
+    );
+  }
+
+  private async resolveLocationFromIp(ip: string): Promise<{
+    city?: string | null;
+    region?: string | null;
+    country?: string | null;
+    countryCode?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
+  } | null> {
+    if (typeof fetch !== 'function') return null;
+
+    try {
+      const response = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, {
+        headers: {
+          'User-Agent': 'telemedicine-app',
+        },
+      });
+
+      if (!response.ok) return null;
+
+      const data: any = await response.json();
+      if (!data || data.error) return null;
+
+      const latitudeRaw = (data as any).latitude;
+      const longitudeRaw = (data as any).longitude;
+      const latitude =
+        typeof latitudeRaw === 'number'
+          ? latitudeRaw
+          : Number.parseFloat(String(latitudeRaw));
+      const longitude =
+        typeof longitudeRaw === 'number'
+          ? longitudeRaw
+          : Number.parseFloat(String(longitudeRaw));
+
+      return {
+        city: typeof data.city === 'string' ? data.city : null,
+        region: typeof data.region === 'string' ? data.region : null,
+        country: typeof data.country_name === 'string' ? data.country_name : null,
+        countryCode: typeof data.country_code === 'string' ? data.country_code : null,
+        latitude: Number.isFinite(latitude) ? latitude : null,
+        longitude: Number.isFinite(longitude) ? longitude : null,
+      };
+    } catch (error: any) {
+      this.logger.warn(`ip lookup failed ip=${ip} message=${error?.message || String(error)}`);
+      return null;
+    }
+  }
+
+  private async tryUpdatePatientLocation(
+    consultationId: string,
+    clientIp?: string | null,
+  ) {
+    const ip = this.normalizeClientIp(clientIp);
+    if (!ip) return;
+
+    const location = await this.resolveLocationFromIp(ip);
+    if (!location) return;
+
+    await this.prisma.consultation.update({
+      where: { id: consultationId },
+      data: {
+        ...(location.countryCode ? { patientCountryCode: location.countryCode } : {}),
+        ...(location.country ? { patientCountry: location.country } : {}),
+        ...(location.region ? { patientProvince: location.region } : {}),
+        ...(location.city ? { patientCity: location.city } : {}),
+        ...(typeof location.latitude === 'number'
+          ? { patientLatitude: location.latitude }
+          : {}),
+        ...(typeof location.longitude === 'number'
+          ? { patientLongitude: location.longitude }
+          : {}),
+      },
+    });
+  }
+
   private generateVideoJwt(identity: string, roomName: string) {
     const AccessToken = twilio.jwt.AccessToken;
     const VideoGrant = AccessToken.VideoGrant;
@@ -187,7 +304,7 @@ export class TwilioService {
     };
   }
 
-  async guestToken(linkToken: string, displayName: string) {
+  async guestToken(linkToken: string, displayName: string, clientIp?: string | null) {
     const c = await this.consultations.getByLinkToken(linkToken);
 
     this.assertJoinable(c);
@@ -198,6 +315,10 @@ export class TwilioService {
     const patientName = normalizedName;
 
     await this.consultations.lockPatientIfNeeded(c.id, identity, patientName);
+
+    if (!this.hasPatientLocation(c)) {
+      await this.tryUpdatePatientLocation(c.id, clientIp);
+    }
 
     if (patientName && patientName !== c.patientName) {
       await this.prisma.consultation.update({
