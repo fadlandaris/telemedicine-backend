@@ -68,6 +68,12 @@ model Consultation {
   patientName String?
   patientIdentity String?
   patientJoinedAt DateTime?
+  patientCountryCode String?
+  patientCountry String?
+  patientProvince String?
+  patientCity String?
+  patientLatitude Float?
+  patientLongitude Float?
 
   twilioCallSid String?
   startedAt     DateTime?
