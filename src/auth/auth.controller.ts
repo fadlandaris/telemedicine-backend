@@ -29,7 +29,7 @@ export class AuthController {
       httpOnly: true,
       sameSite: "lax",
       secure: false, // true kalau https
-      path: "/auth",
+      path: "/",
       maxAge: 1000 * 60 * 60 * 24 * 30,
     });
 
@@ -55,11 +55,11 @@ export class AuthController {
       httpOnly: true,
       sameSite: "lax",
       secure: false,
-      path: "/auth",
+      path: "/",
       maxAge: 1000 * 60 * 60 * 24 * 30,
     });
 
-    return { accessToken: result.accessToken };
+    return { accessToken: result.accessToken, doctor: result.doctor };
   }
 
   @UseGuards(JwtGuard)
@@ -76,7 +76,7 @@ export class AuthController {
       userAgent: typeof userAgent === "string" ? userAgent : undefined,
     });
 
-    res.clearCookie("refresh_token", { path: "/auth" });
+    res.clearCookie("refresh_token", { path: "/" });
     return { ok: true };
   }
 
