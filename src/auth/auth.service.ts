@@ -219,6 +219,12 @@ export class AuthService {
       accessToken,
       refreshToken: newRefreshRaw,
       refreshTokenId: created.id,
+      doctor: {
+        id: existing.doctor.id,
+        email: existing.doctor.email,
+        name: existing.doctor.name,
+        twilioIdentity: existing.doctor.twilioIdentity,
+      },
     };
   }
 
