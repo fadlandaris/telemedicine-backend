@@ -16,4 +16,22 @@ export class GetCallsQueryDto {
   @IsOptional()
   @IsIn(['newest', 'oldest'])
   sort?: 'newest' | 'oldest';
+
+  @IsOptional()
+  @IsIn(['STARTED', 'CONNECTED', 'RECORDING_READY', 'COMPLETED', 'FAILED'])
+  status?: 'STARTED' | 'CONNECTED' | 'RECORDING_READY' | 'COMPLETED' | 'FAILED';
+}
+
+export class GetCallStatsQueryDto {
+  @IsOptional()
+  @IsString()
+  startDate?: string;
+
+  @IsOptional()
+  @IsString()
+  endDate?: string;
+
+  @IsOptional()
+  @IsString()
+  tzOffset?: string;
 }
