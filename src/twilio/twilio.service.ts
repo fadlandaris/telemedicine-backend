@@ -13,6 +13,8 @@ import { ConsultationsService } from '../consultations/consultations.service';
 import { createHash } from 'crypto';
 import { LocalStorageService } from 'src/video/local-storage.service';
 import { randomUUID } from 'crypto';
+import { VideoTranscriptionDto } from './dto/twilio.dto';
+import { AiService } from 'src/ai-summary/ai.service';
 
 @Injectable()
 export class TwilioService {
@@ -31,10 +33,19 @@ export class TwilioService {
     @Inject(forwardRef(() => ConsultationsService))
     private consultations: ConsultationsService,
     private localStorage: LocalStorageService,
+    private aiService: AiService,
   ) {
     this.client = twilio(this.apiKeySid, this.apiKeySecret, {
       accountSid: this.accountSid,
     });
+  }
+
+  private runInBackground(taskName: string, job: () => Promise<void>, delayMs = 0) {
+    setTimeout(() => {
+      void job().catch((err) => {
+        this.logger.error(`[background:${taskName}] ${err?.message || err}`);
+      });
+    }, delayMs);
   }
 
   private normalizeClientIp(ip?: string | null): string | null {
@@ -416,6 +427,14 @@ export class TwilioService {
         }),
       ]);
 
+      this.runInBackground(
+        `ai-summary:${consultation.id}`,
+        async () => {
+          await this.aiService.processConsultationFromTranscript(consultation.id);
+        },
+        2000,
+      );
+
       return {
         success: true,
         consultationId: consultation.id,
@@ -570,6 +589,61 @@ export class TwilioService {
     playableUrl,
   };
 }
+
+  async saveTranscription(doctorId: string, payload: VideoTranscriptionDto) {
+    const consultationId = payload.consultationId?.trim();
+    const transcription = payload.transcription?.trim();
+
+    if (!consultationId) {
+      throw new BadRequestException('consultationId wajib');
+    }
+
+    if (!transcription) {
+      return { success: true, ignored: true };
+    }
+
+    const consultation = await this.prisma.consultation.findFirst({
+      where: {
+        id: consultationId,
+        doctorId,
+      },
+      include: {
+        consultationNote: true,
+      },
+    });
+
+    if (!consultation) {
+      throw new NotFoundException('Consultation tidak ditemukan');
+    }
+
+    const existing = consultation.consultationNote?.transcriptRaw ?? '';
+    const currentStatus = String(consultation.consultationNote?.aiStatus ?? '').toUpperCase();
+    const nextStatus =
+      currentStatus === 'SUMMARIZING' || currentStatus === 'SUCCESS'
+        ? consultation.consultationNote?.aiStatus ?? null
+        : 'TRANSCRIBING';
+    const nextTranscript = existing ? `${existing}\n${transcription}` : transcription;
+
+    await this.prisma.consultationNote.upsert({
+      where: { consultationId },
+      update: {
+        doctorId,
+        transcriptRaw: nextTranscript,
+        transcribedAt: new Date(),
+        ...(nextStatus ? { aiStatus: nextStatus, aiError: null } : {}),
+      },
+      create: {
+        consultationId,
+        doctorId,
+        transcriptRaw: nextTranscript,
+        transcribedAt: new Date(),
+        aiStatus: nextStatus ?? 'TRANSCRIBING',
+        aiError: null,
+      },
+    });
+
+    return { success: true };
+  }
 
 async downloadCompositionToLocal(compositionSid: string, consultationId: string) {
   const mediaUrl = await this.getCompositionMediaUrl(compositionSid, 3600);
