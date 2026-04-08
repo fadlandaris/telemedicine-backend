@@ -1,6 +1,6 @@
 import { Controller, Post, Body, UseGuards, Req, Param, Get } from '@nestjs/common';
 import { TwilioService } from './twilio.service';
-import { DoctorVideoTokenDto, GuestVideoTokenDto } from './dto/twilio.dto';
+import { DoctorVideoTokenDto, GuestVideoTokenDto, VideoTranscriptionDto } from './dto/twilio.dto';
 import { JwtGuard } from 'src/auth/guards/jwt.guard';
 
 const getClientIp = (req: any): string | null => {
@@ -83,5 +83,11 @@ export class TwilioController {
   @Get('video/result/:consultationId')
   async getCallResult(@Req() req: any, @Param('consultationId') consultationId: string) {
     return this.twilio.getCallSessionResult(req.user.id, consultationId);
+  }
+
+  @UseGuards(JwtGuard)
+  @Post('video/transcription')
+  async saveTranscription(@Req() req: any, @Body() dto: VideoTranscriptionDto) {
+    return this.twilio.saveTranscription(req.user.id, dto);
   }
 }
