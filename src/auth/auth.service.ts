@@ -1,10 +1,17 @@
-import { ForbiddenException, Injectable, UnauthorizedException} from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { PrismaService } from "prisma/prisma.service";
 import { JwtService } from "@nestjs/jwt";
 import crypto from "crypto";
-import { AuthAction } from "@prisma/client";
+import { AuthAction, OAuthProvider, UserRole } from "@prisma/client";
+import type { DoctorProfile, PatientProfile, AdminProfile, User } from "@prisma/client";
+import type { JwtPayload } from "./types/jwt-payload";
 import type { StringValue } from "ms";
-
+import bcrypt from "bcryptjs";
 
 function sha256(raw: string) {
   return crypto.createHash("sha256").update(raw).digest("hex");
@@ -21,12 +28,62 @@ function parseTtlToMs(ttl: string): number {
   const n = Number(m[1]);
   const unit = m[2];
   const mult =
-    unit === "s" ? 1000 :
-    unit === "m" ? 60_000 :
-    unit === "h" ? 3_600_000 :
-    86_400_000; // d
+    unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000; // d
   return n * mult;
 }
+
+const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
+const VERIFY_LINK_TTL_MINUTES = 30;
+const OAUTH_STATE_TTL_MINUTES = 10;
+
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+function normalizePhone(phone: string) {
+  return phone.replace(/\D/g, "");
+}
+
+function ensurePhoneDigits(raw: string, normalized: string) {
+  if (!normalized) throw new BadRequestException("Nomor telepon wajib diisi");
+  if (!/^\d+$/.test(raw.trim())) {
+    throw new BadRequestException("Nomor telepon harus angka");
+  }
+}
+
+function ensurePasswordPolicy(password: string) {
+  if (!PASSWORD_REGEX.test(password)) {
+    throw new BadRequestException(
+      "Password minimal 8 karakter, harus ada 1 lowercase, 1 uppercase, dan 1 number",
+    );
+  }
+}
+
+function parseBornDate(raw?: string) {
+  if (!raw) return null;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) {
+    throw new BadRequestException("Tanggal lahir tidak valid");
+  }
+  return d;
+}
+
+function ensureMinimumAge(bornDate: Date, minYears: number) {
+  const now = new Date();
+  const cutoff = new Date(
+    now.getFullYear() - minYears,
+    now.getMonth(),
+    now.getDate(),
+  );
+  if (bornDate > cutoff) {
+    throw new BadRequestException(`Minimal umur ${minYears} tahun`);
+  }
+}
+
+type ProfileWithUser =
+  | (DoctorProfile & { user: User })
+  | (AdminProfile & { user: User })
+  | (PatientProfile & { user: User });
 
 @Injectable()
 export class AuthService {
@@ -35,8 +92,11 @@ export class AuthService {
   private accessTtl = process.env.JWT_ACCESS_TTL || "15m";
   private refreshTtl = process.env.JWT_REFRESH_TTL || "30d";
 
+  private frontendBaseUrl = process.env.APP_PUBLIC_BASE_URL || "http://localhost:3000";
+  private backendBaseUrl = process.env.APP_BASE_URL || "http://localhost:4000";
+
   private async audit(params: {
-    doctorId?: string;
+    userId?: string;
     email?: string;
     action: AuthAction;
     success: boolean;
@@ -45,7 +105,7 @@ export class AuthService {
   }) {
     await this.prisma.authAuditLog.create({
       data: {
-        doctorId: params.doctorId,
+        userId: params.userId,
         email: params.email,
         action: params.action,
         success: params.success,
@@ -55,76 +115,317 @@ export class AuthService {
     });
   }
 
-  private async verifyPasswordSeedCompatible(raw: string, passwordHash: string) {
-    // kompatibel seeder: passwordHash = sha256(password)
-    return sha256(raw) === passwordHash;
+  private async hashPassword(raw: string) {
+    return bcrypt.hash(raw, 10);
   }
 
-  async login(input: {
+  private async verifyPassword(raw: string, passwordHash: string) {
+    return bcrypt.compare(raw, passwordHash);
+  }
+
+  private parseRole(raw: string): UserRole {
+    const value = String(raw || "").trim().toUpperCase();
+    if (value === "DOCTOR") return UserRole.DOCTOR;
+    if (value === "ADMIN") return UserRole.ADMIN;
+    if (value === "PATIENT") return UserRole.PATIENT;
+    throw new BadRequestException("Role tidak valid");
+  }
+
+  private parseProvider(raw: string): OAuthProvider {
+    const value = String(raw || "").trim().toUpperCase();
+    if (value === "GOOGLE") return OAuthProvider.GOOGLE;
+    if (value === "MICROSOFT") return OAuthProvider.MICROSOFT;
+    throw new BadRequestException("Provider OAuth tidak valid");
+  }
+
+  private async findProfileByIdentifier(lookup: { email?: string; phone?: string }) {
+    const [doctor, admin, patient] = await this.prisma.$transaction([
+      this.prisma.doctorProfile.findFirst({
+        where: lookup,
+        include: { user: true },
+      }),
+      this.prisma.adminProfile.findFirst({
+        where: lookup,
+        include: { user: true },
+      }),
+      this.prisma.patientProfile.findFirst({
+        where: lookup,
+        include: { user: true },
+      }),
+    ]);
+
+    const matches = [doctor, admin, patient].filter(Boolean) as ProfileWithUser[];
+    if (matches.length === 0) return null;
+    if (matches.length > 1) {
+      throw new BadRequestException("Data email/telepon duplikat di profile");
+    }
+    return matches[0];
+  }
+
+  private async getProfileByUserId(userId: string, role: UserRole) {
+    if (role === UserRole.DOCTOR) {
+      return this.prisma.doctorProfile.findUnique({ where: { userId } });
+    }
+    if (role === UserRole.ADMIN) {
+      return this.prisma.adminProfile.findUnique({ where: { userId } });
+    }
+    return this.prisma.patientProfile.findUnique({ where: { userId } });
+  }
+
+  private async ensureEmailPhoneAvailable(
+    email: string,
+    phone: string,
+    options?: { excludePendingId?: string },
+  ) {
+    const [doctor, admin, patient] = await this.prisma.$transaction([
+      this.prisma.doctorProfile.findFirst({
+        where: { OR: [{ email }, { phone }] },
+        select: { id: true },
+      }),
+      this.prisma.adminProfile.findFirst({
+        where: { OR: [{ email }, { phone }] },
+        select: { id: true },
+      }),
+      this.prisma.patientProfile.findFirst({
+        where: { OR: [{ email }, { phone }] },
+        select: { id: true },
+      }),
+    ]);
+
+    if (doctor || admin || patient) {
+      throw new BadRequestException("Email atau nomor telepon sudah terdaftar");
+    }
+
+    const pending = await this.prisma.pendingRegistration.findFirst({
+      where: {
+        OR: [{ email }, { phone }],
+        ...(options?.excludePendingId
+          ? { id: { not: options.excludePendingId } }
+          : {}),
+      },
+      select: { id: true },
+    });
+    if (pending) {
+      throw new BadRequestException("Email atau nomor telepon sudah terdaftar");
+    }
+  }
+
+  private async ensureLicenseValid(license: string, options?: { excludePendingId?: string }) {
+    const exists = await this.prisma.licenseWhitelist.findUnique({
+      where: { license },
+      select: { id: true },
+    });
+    if (!exists) throw new BadRequestException("License tidak terdaftar");
+
+    const used = await this.prisma.doctorProfile.findUnique({
+      where: { license },
+      select: { id: true },
+    });
+    if (used) throw new BadRequestException("License sudah digunakan");
+
+    const pending = await this.prisma.pendingRegistration.findFirst({
+      where: {
+        license,
+        ...(options?.excludePendingId
+          ? { id: { not: options.excludePendingId } }
+          : {}),
+      },
+      select: { id: true },
+    });
+    if (pending) throw new BadRequestException("License sedang digunakan");
+  }
+
+  private async ensureAdminIdValid(adminId: string, options?: { excludePendingId?: string }) {
+    const exists = await this.prisma.adminIdWhitelist.findUnique({
+      where: { adminId },
+      select: { id: true },
+    });
+    if (!exists) throw new BadRequestException("Admin ID tidak terdaftar");
+
+    const used = await this.prisma.adminProfile.findUnique({
+      where: { adminId },
+      select: { id: true },
+    });
+    if (used) throw new BadRequestException("Admin ID sudah digunakan");
+
+    const pending = await this.prisma.pendingRegistration.findFirst({
+      where: {
+        adminId,
+        ...(options?.excludePendingId
+          ? { id: { not: options.excludePendingId } }
+          : {}),
+      },
+      select: { id: true },
+    });
+    if (pending) throw new BadRequestException("Admin ID sedang digunakan");
+  }
+
+  private async generateUniqueTwilioIdentity(): Promise<string> {
+    for (let i = 0; i < 5; i++) {
+      const candidate = `doc_${crypto.randomBytes(10).toString("hex")}`;
+      const exists = await this.prisma.user.findUnique({
+        where: { twilioIdentity: candidate },
+        select: { id: true },
+      });
+      if (!exists) return candidate;
+    }
+    throw new Error("Failed to generate unique Twilio identity");
+  }
+
+  private async buildAccessTokenPayload(user: {
+    id: string;
     email: string;
-    password: string;
+    role: UserRole;
+    twilioIdentity?: string | null;
+  }) {
+    return {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      twilioIdentity: user.twilioIdentity ?? undefined,
+    };
+  }
+
+  private async issueTokens(params: {
+    userId: string;
+    email: string;
+    role: UserRole;
+    twilioIdentity?: string | null;
     ip?: string;
     userAgent?: string;
   }) {
-    const doctor = await this.prisma.doctor.findUnique({
-      where: { email: input.email.toLowerCase() },
+    const payload = await this.buildAccessTokenPayload({
+      id: params.userId,
+      email: params.email,
+      role: params.role,
+      twilioIdentity: params.twilioIdentity ?? undefined,
     });
-
-    if (!doctor || !doctor.isActive) {
-      await this.audit({
-        email: input.email,
-        action: AuthAction.LOGIN,
-        success: false,
-        ip: input.ip,
-        userAgent: input.userAgent,
-      });
-      throw new UnauthorizedException("Email / password salah");
-    }
-
-    const ok = await this.verifyPasswordSeedCompatible(input.password, doctor.passwordHash);
-    if (!ok) {
-      await this.audit({
-        doctorId: doctor.id,
-        email: doctor.email,
-        action: AuthAction.LOGIN,
-        success: false,
-        ip: input.ip,
-        userAgent: input.userAgent,
-      });
-      throw new UnauthorizedException("Email / password salah");
-    }
-
-    // access token (JWT)
-    const payload = {
-      sub: doctor.id,
-      email: doctor.email,
-      twilioIdentity: doctor.twilioIdentity,
-    };
 
     const accessToken = await this.jwt.signAsync(payload, {
       secret: process.env.JWT_ACCESS_SECRET!,
       expiresIn: this.accessTtl as StringValue,
     });
 
-    // refresh token = random + simpan hash di DB
     const refreshRaw = randomToken();
     const refreshHash = sha256(refreshRaw);
     const refreshExpiresAt = new Date(Date.now() + parseTtlToMs(this.refreshTtl));
 
     const refreshRow = await this.prisma.refreshToken.create({
       data: {
-        doctorId: doctor.id,
+        userId: params.userId,
         tokenHash: refreshHash,
-        userAgent: input.userAgent,
-        ip: input.ip,
+        userAgent: params.userAgent,
+        ip: params.ip,
         expiresAt: refreshExpiresAt,
       },
-      select: { id: true, expiresAt: true },
+      select: { id: true },
+    });
+
+    return {
+      accessToken,
+      refreshToken: refreshRaw,
+      refreshTokenId: refreshRow.id,
+    };
+  }
+
+  private async sendVerificationEmail(email: string, token: string) {
+    const apiKey = process.env.RESEND_API_KEY;
+    const fromEmail = process.env.RESEND_FROM_EMAIL || "no-reply@telemedicine.local";
+    const verifyLink = `${this.frontendBaseUrl}/auth/registration/verify-email?token=${token}`;
+
+    if (!apiKey) {
+      console.warn("RESEND_API_KEY kosong. Link verifikasi:", verifyLink);
+      return;
+    }
+
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: fromEmail,
+        to: [email],
+        subject: "Verifikasi Email - Telemedicine",
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+            <p>Halo,</p>
+            <p>Silakan verifikasi email kamu dengan klik link di bawah ini:</p>
+            <p><a href="${verifyLink}">${verifyLink}</a></p>
+            <p>Link ini berlaku selama ${VERIFY_LINK_TTL_MINUTES} menit.</p>
+          </div>
+        `,
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Gagal mengirim email verifikasi: ${text}`);
+    }
+  }
+
+  async login(input: {
+    identifier: string;
+    password: string;
+    ip?: string;
+    userAgent?: string;
+  }) {
+    const rawIdentifier = (input.identifier || "").trim();
+    if (!rawIdentifier) throw new BadRequestException("Email/phone wajib diisi");
+
+    const isEmail = rawIdentifier.includes("@");
+    const lookup = isEmail
+      ? { email: normalizeEmail(rawIdentifier) }
+      : { phone: normalizePhone(rawIdentifier) };
+
+    if (!isEmail && !lookup.phone) {
+      throw new BadRequestException("Nomor telepon tidak valid");
+    }
+
+    const profile = await this.findProfileByIdentifier(lookup);
+    const user = profile?.user;
+
+    if (!profile || !user || !user.isActive) {
+      await this.audit({
+        email: isEmail ? lookup.email : undefined,
+        action: AuthAction.LOGIN,
+        success: false,
+        ip: input.ip,
+        userAgent: input.userAgent,
+      });
+      throw new UnauthorizedException("Email/phone atau password salah");
+    }
+
+    if (!profile.passwordHash) {
+      throw new UnauthorizedException("Akun ini menggunakan OAuth. Silakan login via Google/Microsoft");
+    }
+
+    const ok = await this.verifyPassword(input.password, profile.passwordHash);
+    if (!ok) {
+      await this.audit({
+        userId: user.id,
+        email: profile.email,
+        action: AuthAction.LOGIN,
+        success: false,
+        ip: input.ip,
+        userAgent: input.userAgent,
+      });
+      throw new UnauthorizedException("Email/phone atau password salah");
+    }
+
+    const tokens = await this.issueTokens({
+      userId: user.id,
+      email: profile.email,
+      role: user.role,
+      twilioIdentity: user.twilioIdentity,
+      ip: input.ip,
+      userAgent: input.userAgent,
     });
 
     await this.audit({
-      doctorId: doctor.id,
-      email: doctor.email,
+      userId: user.id,
+      email: profile.email,
       action: AuthAction.LOGIN,
       success: true,
       ip: input.ip,
@@ -132,14 +433,588 @@ export class AuthService {
     });
 
     return {
-      accessToken,
-      refreshToken: refreshRaw,
-      refreshTokenId: refreshRow.id,
-      doctor: {
-        id: doctor.id,
-        email: doctor.email,
-        name: doctor.name,
-        twilioIdentity: doctor.twilioIdentity,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      user: {
+        id: user.id,
+        email: profile.email,
+        name: user.name,
+        role: user.role,
+        phone: profile.phone,
+        twilioIdentity: user.twilioIdentity,
+      },
+    };
+  }
+
+  async register(input: {
+    role: UserRole;
+    fullName: string;
+    email: string;
+    phone: string;
+    password: string;
+    confirmPassword: string;
+    license?: string;
+    adminId?: string;
+    bornDate?: string;
+  }) {
+    const role = input.role;
+    const name = (input.fullName || "").trim();
+    const email = normalizeEmail(input.email || "");
+    const phone = normalizePhone(input.phone || "");
+
+    if (!name) throw new BadRequestException("Nama lengkap wajib diisi");
+    if (!email) throw new BadRequestException("Email wajib diisi");
+    ensurePhoneDigits(input.phone || "", phone);
+
+    ensurePasswordPolicy(input.password);
+
+    if (input.password !== input.confirmPassword) {
+      throw new BadRequestException("Konfirmasi password tidak sama");
+    }
+
+    await this.ensureEmailPhoneAvailable(email, phone);
+
+    if (role === UserRole.DOCTOR) {
+      if (!input.license?.trim()) {
+        throw new BadRequestException("License wajib diisi");
+      }
+      await this.ensureLicenseValid(input.license.trim());
+    }
+
+    if (role === UserRole.ADMIN) {
+      if (!input.adminId?.trim()) {
+        throw new BadRequestException("Admin ID wajib diisi");
+      }
+      await this.ensureAdminIdValid(input.adminId.trim());
+    }
+
+    if (role === UserRole.PATIENT) {
+      const bornDate = parseBornDate(input.bornDate);
+      if (!bornDate) throw new BadRequestException("Tanggal lahir wajib diisi");
+      ensureMinimumAge(bornDate, 17);
+    }
+
+    const tokenRaw = randomToken();
+    const tokenHash = sha256(tokenRaw);
+    const expiresAt = new Date(Date.now() + VERIFY_LINK_TTL_MINUTES * 60_000);
+
+    const passwordHash = await this.hashPassword(input.password);
+
+    const pending = await this.prisma.pendingRegistration.create({
+      data: {
+        role,
+        email,
+        phone,
+        name,
+        passwordHash,
+        license: input.license?.trim() || null,
+        adminId: input.adminId?.trim() || null,
+        bornDate: input.bornDate ? parseBornDate(input.bornDate) : null,
+        tokenHash,
+        expiresAt,
+      },
+      select: { id: true },
+    });
+
+    try {
+      await this.sendVerificationEmail(email, tokenRaw);
+    } catch (err) {
+      await this.prisma.pendingRegistration.delete({ where: { id: pending.id } });
+      throw new BadRequestException("Gagal mengirim email verifikasi");
+    }
+
+    await this.audit({
+      email,
+      action: AuthAction.REGISTER,
+      success: true,
+    });
+
+    return { ok: true };
+  }
+
+  async verifyEmail(input: { token: string }) {
+    const tokenHash = sha256(input.token || "");
+    const pending = await this.prisma.pendingRegistration.findUnique({
+      where: { tokenHash },
+    });
+
+    if (!pending) throw new BadRequestException("Token verifikasi tidak valid");
+    if (pending.expiresAt.getTime() <= Date.now()) {
+      await this.prisma.pendingRegistration.delete({ where: { id: pending.id } });
+      throw new BadRequestException("Token verifikasi sudah expired");
+    }
+
+    await this.ensureEmailPhoneAvailable(pending.email, pending.phone, {
+      excludePendingId: pending.id,
+    });
+
+    if (pending.role === UserRole.DOCTOR && pending.license) {
+      await this.ensureLicenseValid(pending.license, { excludePendingId: pending.id });
+    }
+    if (pending.role === UserRole.ADMIN && pending.adminId) {
+      await this.ensureAdminIdValid(pending.adminId, { excludePendingId: pending.id });
+    }
+
+    if (pending.role === UserRole.PATIENT && pending.bornDate) {
+      ensureMinimumAge(pending.bornDate, 17);
+    }
+
+    const user = await this.prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          role: pending.role,
+          name: pending.name,
+          emailVerifiedAt: new Date(),
+          isActive: true,
+          twilioIdentity:
+            pending.role === UserRole.DOCTOR
+              ? await this.generateUniqueTwilioIdentity()
+              : null,
+        },
+      });
+
+      if (pending.role === UserRole.DOCTOR) {
+        await tx.doctorProfile.create({
+          data: {
+            userId: newUser.id,
+            fullName: pending.name,
+            email: pending.email,
+            phone: pending.phone,
+            passwordHash: pending.passwordHash,
+            license: pending.license!,
+          },
+        });
+      }
+
+      if (pending.role === UserRole.ADMIN) {
+        await tx.adminProfile.create({
+          data: {
+            userId: newUser.id,
+            fullName: pending.name,
+            email: pending.email,
+            phone: pending.phone,
+            passwordHash: pending.passwordHash,
+            adminId: pending.adminId!,
+          },
+        });
+      }
+
+      if (pending.role === UserRole.PATIENT) {
+        await tx.patientProfile.create({
+          data: {
+            userId: newUser.id,
+            fullName: pending.name,
+            email: pending.email,
+            phone: pending.phone,
+            passwordHash: pending.passwordHash,
+            bornDate: pending.bornDate!,
+          },
+        });
+      }
+
+      await tx.pendingRegistration.delete({ where: { id: pending.id } });
+
+      return newUser;
+    });
+
+    return { ok: true, userId: user.id };
+  }
+
+  async getOAuthStartUrl(input: {
+    provider: string;
+    role: string;
+    redirectUrl?: string;
+  }) {
+    const provider = this.parseProvider(input.provider);
+    const role = this.parseRole(input.role);
+
+    const state = await this.prisma.oauthState.create({
+      data: {
+        provider,
+        role,
+        redirectUrl: input.redirectUrl || null,
+        expiresAt: new Date(Date.now() + OAUTH_STATE_TTL_MINUTES * 60_000),
+      },
+    });
+
+    const redirectUri = this.getProviderRedirectUri(provider);
+    if (provider === OAuthProvider.GOOGLE) {
+      const params = new URLSearchParams({
+        client_id: process.env.OAUTH_GOOGLE_CLIENT_ID || "",
+        redirect_uri: redirectUri,
+        response_type: "code",
+        scope: "openid email profile",
+        state: state.id,
+        access_type: "offline",
+        prompt: "consent",
+      });
+      return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+    }
+
+    const params = new URLSearchParams({
+      client_id: process.env.OAUTH_MICROSOFT_CLIENT_ID || "",
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "openid email profile",
+      state: state.id,
+      prompt: "select_account",
+    });
+
+    return `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params.toString()}`;
+  }
+
+  private getProviderRedirectUri(provider: OAuthProvider) {
+    if (provider === OAuthProvider.GOOGLE) {
+      return (
+        process.env.OAUTH_GOOGLE_REDIRECT_URI ||
+        `${this.backendBaseUrl}/auth/oauth/google/callback`
+      );
+    }
+
+    return (
+      process.env.OAUTH_MICROSOFT_REDIRECT_URI ||
+      `${this.backendBaseUrl}/auth/oauth/microsoft/callback`
+    );
+  }
+
+  async handleOAuthCallback(input: {
+    provider: string;
+    query: Record<string, string | undefined>;
+    ip?: string;
+    userAgent?: string;
+  }) {
+    const provider = this.parseProvider(input.provider);
+
+    if (input.query.error) {
+      return {
+        redirectUrl: `${this.frontendBaseUrl}/auth/oauth/success?error=${encodeURIComponent(
+          input.query.error,
+        )}`,
+      };
+    }
+
+    const code = input.query.code;
+    const state = input.query.state;
+
+    if (!code || !state) {
+      return {
+        redirectUrl: `${this.frontendBaseUrl}/auth/oauth/success?error=missing_code`,
+      };
+    }
+
+    const oauthState = await this.prisma.oauthState.findUnique({ where: { id: state } });
+    if (!oauthState || oauthState.expiresAt.getTime() <= Date.now()) {
+      return {
+        redirectUrl: `${this.frontendBaseUrl}/auth/oauth/success?error=invalid_state`,
+      };
+    }
+
+    await this.prisma.oauthState.delete({ where: { id: oauthState.id } });
+
+    let profile: { email?: string; name?: string; providerUserId: string };
+    try {
+      profile =
+        provider === OAuthProvider.GOOGLE
+          ? await this.fetchGoogleProfile(code)
+          : await this.fetchMicrosoftProfile(code);
+    } catch {
+      return {
+        redirectUrl: `${this.frontendBaseUrl}/auth/oauth/success?error=oauth_failed`,
+      };
+    }
+
+    const email = normalizeEmail(profile.email || "");
+    if (!email) {
+      return {
+        redirectUrl: `${this.frontendBaseUrl}/auth/oauth/success?error=missing_email`,
+      };
+    }
+    if (!profile.providerUserId) {
+      return {
+        redirectUrl: `${this.frontendBaseUrl}/auth/oauth/success?error=missing_account`,
+      };
+    }
+
+    const existingProfile = await this.findProfileByIdentifier({ email });
+    const existingUser = existingProfile?.user;
+
+    if (existingUser && existingUser.role !== oauthState.role) {
+      return {
+        redirectUrl: `${this.frontendBaseUrl}/auth/oauth/success?error=email_used`,
+      };
+    }
+
+    if (existingUser) {
+      if (!existingUser.isActive) {
+        return {
+          redirectUrl: `${this.frontendBaseUrl}/auth/oauth/success?error=inactive`,
+        };
+      }
+      await this.prisma.oauthAccount.upsert({
+        where: {
+          provider_providerUserId: {
+            provider,
+            providerUserId: profile.providerUserId,
+          },
+        },
+        update: { userId: existingUser.id, email },
+        create: {
+          userId: existingUser.id,
+          provider,
+          providerUserId: profile.providerUserId,
+          email,
+        },
+      });
+
+      const tokens = await this.issueTokens({
+        userId: existingUser.id,
+        email: existingProfile!.email,
+        role: existingUser.role,
+        twilioIdentity: existingUser.twilioIdentity,
+        ip: input.ip,
+        userAgent: input.userAgent,
+      });
+
+      await this.audit({
+        userId: existingUser.id,
+        email: existingProfile!.email,
+        action: AuthAction.LOGIN,
+        success: true,
+        ip: input.ip,
+        userAgent: input.userAgent,
+      });
+
+      const redirectUrl = `${this.frontendBaseUrl}/auth/oauth/success?accessToken=${encodeURIComponent(
+        tokens.accessToken,
+      )}`;
+
+      return { redirectUrl, refreshToken: tokens.refreshToken };
+    }
+
+    const pending = await this.prisma.oauthPending.upsert({
+      where: {
+        provider_providerUserId: {
+          provider,
+          providerUserId: profile.providerUserId,
+        },
+      },
+      update: {
+        role: oauthState.role,
+        email,
+        name: profile.name || null,
+        expiresAt: new Date(Date.now() + VERIFY_LINK_TTL_MINUTES * 60_000),
+      },
+      create: {
+        provider,
+        role: oauthState.role,
+        providerUserId: profile.providerUserId,
+        email,
+        name: profile.name || null,
+        expiresAt: new Date(Date.now() + VERIFY_LINK_TTL_MINUTES * 60_000),
+      },
+    });
+
+    return {
+      redirectUrl: `${this.frontendBaseUrl}/auth/oauth/complete?token=${pending.id}&role=${pending.role}`,
+    };
+  }
+
+  private async fetchGoogleProfile(code: string) {
+    const redirectUri = this.getProviderRedirectUri(OAuthProvider.GOOGLE);
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: process.env.OAUTH_GOOGLE_CLIENT_ID || "",
+        client_secret: process.env.OAUTH_GOOGLE_CLIENT_SECRET || "",
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }).toString(),
+    });
+
+    const tokenJson = await tokenRes.json();
+    if (!tokenRes.ok) {
+      throw new BadRequestException("OAuth Google gagal");
+    }
+
+    const userRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+      headers: { Authorization: `Bearer ${tokenJson.access_token}` },
+    });
+    const userJson = await userRes.json();
+
+    return {
+      email: userJson.email as string | undefined,
+      name: userJson.name as string | undefined,
+      providerUserId: userJson.sub as string,
+    };
+  }
+
+  private async fetchMicrosoftProfile(code: string) {
+    const redirectUri = this.getProviderRedirectUri(OAuthProvider.MICROSOFT);
+    const tokenRes = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: process.env.OAUTH_MICROSOFT_CLIENT_ID || "",
+        client_secret: process.env.OAUTH_MICROSOFT_CLIENT_SECRET || "",
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+        scope: "openid email profile",
+      }).toString(),
+    });
+
+    const tokenJson = await tokenRes.json();
+    if (!tokenRes.ok) {
+      throw new BadRequestException("OAuth Microsoft gagal");
+    }
+
+    const userRes = await fetch("https://graph.microsoft.com/oidc/userinfo", {
+      headers: { Authorization: `Bearer ${tokenJson.access_token}` },
+    });
+    const userJson = await userRes.json();
+
+    return {
+      email: (userJson.email || userJson.preferred_username) as string | undefined,
+      name: userJson.name as string | undefined,
+      providerUserId: (userJson.sub || userJson.oid) as string,
+    };
+  }
+
+  async completeOAuth(input: {
+    token: string;
+    phone: string;
+    name?: string;
+    license?: string;
+    adminId?: string;
+    bornDate?: string;
+    ip?: string;
+    userAgent?: string;
+  }) {
+    const pending = await this.prisma.oauthPending.findUnique({
+      where: { id: input.token },
+    });
+
+    if (!pending) throw new BadRequestException("Token OAuth tidak valid");
+    if (pending.expiresAt.getTime() <= Date.now()) {
+      await this.prisma.oauthPending.delete({ where: { id: pending.id } });
+      throw new BadRequestException("Token OAuth sudah expired");
+    }
+
+    const email = normalizeEmail(pending.email);
+    const phone = normalizePhone(input.phone || "");
+    ensurePhoneDigits(input.phone || "", phone);
+
+    const name = (input.name || pending.name || "").trim();
+    if (!name) throw new BadRequestException("Nama lengkap wajib diisi");
+
+    await this.ensureEmailPhoneAvailable(email, phone);
+
+    if (pending.role === UserRole.DOCTOR) {
+      const license = (input.license || "").trim();
+      if (!license) throw new BadRequestException("License wajib diisi");
+      await this.ensureLicenseValid(license);
+    }
+
+    if (pending.role === UserRole.ADMIN) {
+      const adminId = (input.adminId || "").trim();
+      if (!adminId) throw new BadRequestException("Admin ID wajib diisi");
+      await this.ensureAdminIdValid(adminId);
+    }
+
+    if (pending.role === UserRole.PATIENT) {
+      const bornDate = parseBornDate(input.bornDate);
+      if (!bornDate) throw new BadRequestException("Tanggal lahir wajib diisi");
+      ensureMinimumAge(bornDate, 17);
+    }
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          role: pending.role,
+          name,
+          emailVerifiedAt: new Date(),
+          isActive: true,
+          twilioIdentity:
+            pending.role === UserRole.DOCTOR
+              ? await this.generateUniqueTwilioIdentity()
+              : null,
+        },
+      });
+
+      if (pending.role === UserRole.DOCTOR) {
+        await tx.doctorProfile.create({
+          data: {
+            userId: newUser.id,
+            fullName: name,
+            email,
+            phone,
+            passwordHash: null,
+            license: input.license!.trim(),
+          },
+        });
+      }
+
+      if (pending.role === UserRole.ADMIN) {
+        await tx.adminProfile.create({
+          data: {
+            userId: newUser.id,
+            fullName: name,
+            email,
+            phone,
+            passwordHash: null,
+            adminId: input.adminId!.trim(),
+          },
+        });
+      }
+
+      if (pending.role === UserRole.PATIENT) {
+        await tx.patientProfile.create({
+          data: {
+            userId: newUser.id,
+            fullName: name,
+            email,
+            phone,
+            passwordHash: null,
+            bornDate: parseBornDate(input.bornDate)!,
+          },
+        });
+      }
+
+      await tx.oauthAccount.create({
+        data: {
+          userId: newUser.id,
+          provider: pending.provider,
+          providerUserId: pending.providerUserId,
+          email,
+        },
+      });
+
+      await tx.oauthPending.delete({ where: { id: pending.id } });
+
+      return newUser;
+    });
+
+    const tokens = await this.issueTokens({
+      userId: created.id,
+      email,
+      role: created.role,
+      twilioIdentity: created.twilioIdentity,
+      ip: input.ip,
+      userAgent: input.userAgent,
+    });
+
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      user: {
+        id: created.id,
+        email,
+        name: created.name,
+        role: created.role,
+        phone,
+        twilioIdentity: created.twilioIdentity,
       },
     };
   }
@@ -153,7 +1028,7 @@ export class AuthService {
 
     const existing = await this.prisma.refreshToken.findUnique({
       where: { tokenHash },
-      include: { doctor: true },
+      include: { user: true },
     });
 
     if (!existing) {
@@ -168,7 +1043,10 @@ export class AuthService {
 
     if (existing.revokedAt) throw new UnauthorizedException("Refresh token revoked");
     if (existing.expiresAt.getTime() <= Date.now()) throw new UnauthorizedException("Refresh token expired");
-    if (!existing.doctor.isActive) throw new UnauthorizedException("Doctor inactive");
+    if (!existing.user.isActive) throw new UnauthorizedException("User inactive");
+
+    const profile = await this.getProfileByUserId(existing.user.id, existing.user.role);
+    if (!profile) throw new UnauthorizedException("Profil user tidak ditemukan");
 
     // ROTATE refresh token
     const newRefreshRaw = randomToken();
@@ -177,12 +1055,12 @@ export class AuthService {
 
     const created = await this.prisma.refreshToken.create({
       data: {
-        doctorId: existing.doctorId,
+        userId: existing.userId,
         tokenHash: newRefreshHash,
         userAgent: input.userAgent,
         ip: input.ip,
         expiresAt: newExpiresAt,
-        replacesToken: { connect: { id: existing.id } }, // relation RefreshTokenReplacement
+        replacesToken: { connect: { id: existing.id } },
       },
       select: { id: true },
     });
@@ -195,11 +1073,12 @@ export class AuthService {
       },
     });
 
-    const payload = {
-      sub: existing.doctor.id,
-      email: existing.doctor.email,
-      twilioIdentity: existing.doctor.twilioIdentity,
-    };
+    const payload = await this.buildAccessTokenPayload({
+      id: existing.user.id,
+      email: profile.email,
+      role: existing.user.role,
+      twilioIdentity: existing.user.twilioIdentity,
+    });
 
     const accessToken = await this.jwt.signAsync(payload, {
       secret: process.env.JWT_ACCESS_SECRET!,
@@ -207,8 +1086,8 @@ export class AuthService {
     });
 
     await this.audit({
-      doctorId: existing.doctorId,
-      email: existing.doctor.email,
+      userId: existing.userId,
+      email: profile.email,
       action: AuthAction.REFRESH,
       success: true,
       ip: input.ip,
@@ -219,11 +1098,71 @@ export class AuthService {
       accessToken,
       refreshToken: newRefreshRaw,
       refreshTokenId: created.id,
-      doctor: {
-        id: existing.doctor.id,
-        email: existing.doctor.email,
-        name: existing.doctor.name,
-        twilioIdentity: existing.doctor.twilioIdentity,
+      user: {
+        id: existing.user.id,
+        email: profile.email,
+        name: existing.user.name,
+        role: existing.user.role,
+        phone: profile.phone,
+        twilioIdentity: existing.user.twilioIdentity,
+      },
+    };
+  }
+
+  async oauthSession(input: {
+    accessToken: string;
+    ip?: string;
+    userAgent?: string;
+  }) {
+    if (!input.accessToken) throw new UnauthorizedException("Access token wajib diisi");
+
+    let payload: JwtPayload | null = null;
+    try {
+      payload = await this.jwt.verifyAsync<JwtPayload>(input.accessToken, {
+        secret: process.env.JWT_ACCESS_SECRET!,
+      });
+    } catch {
+      throw new UnauthorizedException("Access token invalid");
+    }
+
+    if (!payload?.sub) throw new UnauthorizedException("Access token invalid");
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+    });
+    if (!user || !user.isActive) throw new UnauthorizedException("Invalid token");
+
+    const profile = await this.getProfileByUserId(user.id, user.role);
+    if (!profile) throw new UnauthorizedException("Profil user tidak ditemukan");
+
+    const tokens = await this.issueTokens({
+      userId: user.id,
+      email: profile.email,
+      role: user.role,
+      twilioIdentity: user.twilioIdentity,
+      ip: input.ip,
+      userAgent: input.userAgent,
+    });
+
+    await this.audit({
+      userId: user.id,
+      email: profile.email,
+      action: AuthAction.LOGIN,
+      success: true,
+      ip: input.ip,
+      userAgent: input.userAgent,
+    });
+
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      user: {
+        id: user.id,
+        email: profile.email,
+        name: user.name,
+        role: user.role,
+        phone: profile.phone,
+        twilioIdentity: user.twilioIdentity,
       },
     };
   }
@@ -231,20 +1170,20 @@ export class AuthService {
   async logout(input: {
     refreshToken?: string;
     revokeAll?: boolean;
-    doctorId?: string;
+    userId?: string;
     ip?: string;
     userAgent?: string;
   }) {
     if (input.revokeAll) {
-      if (!input.doctorId) throw new ForbiddenException("doctorId required");
+      if (!input.userId) throw new ForbiddenException("userId required");
 
       await this.prisma.refreshToken.updateMany({
-        where: { doctorId: input.doctorId, revokedAt: null },
+        where: { userId: input.userId, revokedAt: null },
         data: { revokedAt: new Date() },
       });
 
       await this.audit({
-        doctorId: input.doctorId,
+        userId: input.userId,
         action: AuthAction.LOGOUT,
         success: true,
         ip: input.ip,
@@ -254,15 +1193,15 @@ export class AuthService {
       return { ok: true, revokedAll: true };
     }
 
-    if (!input.refreshToken) return { ok: true }; // idempotent
+    if (!input.refreshToken) return { ok: true };
 
     const tokenHash = sha256(input.refreshToken);
     const row = await this.prisma.refreshToken.findUnique({
       where: { tokenHash },
-      select: { id: true, doctorId: true, revokedAt: true },
+      select: { id: true, userId: true, revokedAt: true },
     });
 
-    if (!row) return { ok: true }; // idempotent
+    if (!row) return { ok: true };
 
     if (!row.revokedAt) {
       await this.prisma.refreshToken.update({
@@ -272,7 +1211,7 @@ export class AuthService {
     }
 
     await this.audit({
-      doctorId: row.doctorId,
+      userId: row.userId,
       action: AuthAction.LOGOUT,
       success: true,
       ip: input.ip,
@@ -282,3 +1221,4 @@ export class AuthService {
     return { ok: true };
   }
 }
+

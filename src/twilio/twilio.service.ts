@@ -285,6 +285,9 @@ export class TwilioService {
     const room = await this.ensureRoomAndPersistSid(c.id, c.roomName);
 
     const identity = c.doctor.twilioIdentity;
+    if (!identity) {
+      throw new BadRequestException('Twilio identity belum tersedia untuk dokter ini');
+    }
     const token = this.generateVideoJwt(identity, c.roomName);
 
     await this.prisma.$transaction([

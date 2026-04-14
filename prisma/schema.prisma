@@ -6,34 +6,183 @@ datasource db {
   provider = "postgresql"
 }
 
-model Doctor {
-  id           String  @id @default(uuid())
-  email        String  @unique
-  passwordHash String
-  name         String?
-  phone        String?
+enum UserRole {
+  DOCTOR
+  ADMIN
+  PATIENT
+}
 
-  // Identity unik & immutable untuk Twilio Voice JS SDK
-  twilioIdentity String @unique
+enum OAuthProvider {
+  GOOGLE
+  MICROSOFT
+}
+
+model User {
+  id           String  @id @default(uuid())
+  role         UserRole
+  name         String
+
+  // Identity unik & immutable untuk Twilio Voice JS SDK (khusus dokter)
+  twilioIdentity String? @unique
 
   isActive        Boolean   @default(true)
   emailVerifiedAt DateTime?
+
+  doctorProfile DoctorProfile?
+  adminProfile  AdminProfile?
+  patientProfile PatientProfile?
 
   refreshTokens      RefreshToken[]
   consultations      Consultation[]
   callSessions       CallSession[]
   consultationNotes  ConsultationNote[]
+  oauthAccounts      OauthAccount[]
+  authAuditLogs      AuthAuditLog[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([role])
   @@index([isActive])
+}
+
+model DoctorProfile {
+  id       String @id @default(uuid())
+  userId   String @unique
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName String
+  email    String @unique
+  phone    String @unique
+  passwordHash String?
+
+  license  String @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([license])
+}
+
+model AdminProfile {
+  id      String @id @default(uuid())
+  userId  String @unique
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName String
+  email    String @unique
+  phone    String @unique
+  passwordHash String?
+
+  adminId String @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([adminId])
+}
+
+model PatientProfile {
+  id       String   @id @default(uuid())
+  userId   String   @unique
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName String
+  email    String @unique
+  phone    String @unique
+  passwordHash String?
+
+  bornDate DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model OauthAccount {
+  id              String        @id @default(uuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider        OAuthProvider
+  providerUserId  String
+  email           String?
+  createdAt       DateTime @default(now())
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@map("OAuthAccount")
+}
+
+model OauthState {
+  id         String        @id @default(uuid())
+  provider   OAuthProvider
+  role       UserRole
+  redirectUrl String?
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("OAuthState")
+}
+
+model OauthPending {
+  id             String        @id @default(uuid())
+  provider       OAuthProvider
+  role           UserRole
+  providerUserId String
+  email          String
+  name           String?
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+
+  @@unique([provider, providerUserId])
+  @@index([email])
+  @@index([expiresAt])
+  @@map("OAuthPending")
+}
+
+model PendingRegistration {
+  id           String   @id @default(uuid())
+  role         UserRole
+  email        String
+  phone        String
+  name         String
+  passwordHash String
+
+  license  String?
+  adminId  String?
+  bornDate DateTime?
+
+  tokenHash String  @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([phone])
+  @@index([expiresAt])
+}
+
+model LicenseWhitelist {
+  id        String   @id @default(uuid())
+  license   String   @unique
+  createdAt DateTime @default(now())
+}
+
+model AdminIdWhitelist {
+  id        String   @id @default(uuid())
+  adminId   String   @unique
+  createdAt DateTime @default(now())
+}
+
+model MrnWhitelist {
+  id        String   @id @default(uuid())
+  mrn       String   @unique
+  createdAt DateTime @default(now())
 }
 
 model RefreshToken {
   id       String @id @default(uuid())
-  doctorId String
-  doctor   Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   tokenHash String  @unique
   userAgent String?
@@ -48,7 +197,7 @@ model RefreshToken {
   expiresAt DateTime
   createdAt DateTime @default(now())
 
-  @@index([doctorId])
+  @@index([userId])
   @@index([expiresAt])
   @@index([revokedAt])
 }
@@ -56,7 +205,7 @@ model RefreshToken {
 model Consultation {
   id       String @id @default(uuid())
   doctorId String
-  doctor   Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctor   User   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
 
   linkToken     String  @unique
   roomName      String  @unique
@@ -84,7 +233,7 @@ model Consultation {
 
   callSession      CallSession?
   consultationNote ConsultationNote?
-  
+
 
   @@index([doctorId])
   @@index([status])
@@ -97,7 +246,7 @@ model CallSession {
   consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
 
   doctorId String?
-  doctor   Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+  doctor   User? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
 
   status CallStatus @default(STARTED)
 
@@ -140,7 +289,7 @@ model ConsultationNote {
   consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
 
   doctorId String?
-  doctor   Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+  doctor   User? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
 
   transcriptRaw String?
   summary       String?
@@ -167,7 +316,8 @@ model ConsultationNote {
 
 model AuthAuditLog {
   id        String     @id @default(uuid())
-  doctorId  String?
+  userId    String?
+  user      User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
   email     String?
   action    AuthAction
   success   Boolean    @default(false)
@@ -175,7 +325,7 @@ model AuthAuditLog {
   userAgent String?
   createdAt DateTime   @default(now())
 
-  @@index([doctorId])
+  @@index([userId])
   @@index([action])
   @@index([createdAt])
 }
