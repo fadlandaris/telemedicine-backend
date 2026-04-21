@@ -6,6 +6,8 @@ import {
   NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
+  Inject,
+  forwardRef
 } from '@nestjs/common';
 import {
   ConsultationMode,
@@ -17,7 +19,7 @@ import { randomUUID } from 'crypto';
 import { AiService } from 'src/ai-summary/ai.service';
 import { LocalStorageService } from 'src/video/local-storage.service';
 import { PrismaService } from 'prisma/prisma.service';
-import { ConsultationsService } from 'src/consultations/consultations.service';
+import { ConsultationsService } from '../consultations/consultations.service';
 import { VideoTranscriptionDto } from './dto/twilio.dto';
 import { VideoCallService } from './videocall.service';
 import { VoiceCallService } from './voicecall.service';
@@ -34,6 +36,7 @@ export class TwilioService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => ConsultationsService))
     private readonly consultationsService: ConsultationsService,
     private readonly localStorage: LocalStorageService,
     private readonly aiService: AiService,
