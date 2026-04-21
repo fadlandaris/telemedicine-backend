@@ -1,43 +1,63 @@
 import {
-  Injectable,
-  ForbiddenException,
-  NotFoundException,
   BadRequestException,
-  Inject,
-  forwardRef,
+  ForbiddenException,
+  Injectable,
   Logger,
+  NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
-import twilio from 'twilio';
-import { PrismaService } from 'prisma/prisma.service';
-import { ConsultationsService } from '../consultations/consultations.service';
-import { createHash } from 'crypto';
-import { LocalStorageService } from 'src/video/local-storage.service';
+import {
+  ConsultationMode,
+  SessionStatus,
+  SessionType,
+  UserRole,
+} from '@prisma/client';
 import { randomUUID } from 'crypto';
-import { VideoTranscriptionDto } from './dto/twilio.dto';
 import { AiService } from 'src/ai-summary/ai.service';
+import { LocalStorageService } from 'src/video/local-storage.service';
+import { PrismaService } from 'prisma/prisma.service';
+import { ConsultationsService } from 'src/consultations/consultations.service';
+import { VideoTranscriptionDto } from './dto/twilio.dto';
+import { VideoCallService } from './videocall.service';
+import { VoiceCallService } from './voicecall.service';
 
 @Injectable()
-export class TwilioService {
+export class TwilioService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TwilioService.name);
-  private client: any;
-
-  private accountSid = process.env.TWILIO_ACCOUNT_SID!;
-  private apiKeySid = process.env.TWILIO_API_KEY_SID!;
-  private apiKeySecret = process.env.TWILIO_API_KEY_SECRET!;
-  private statusCallbackUrl =
+  private readonly statusCallbackUrl =
     process.env.TWILIO_VIDEO_STATUS_CALLBACK_URL ||
     `${process.env.APP_BASE_URL}/twilio/webhooks/video-room`;
 
+  private autoEndTimer: NodeJS.Timeout | null = null;
+  private autoEndRunning = false;
+
   constructor(
-    private prisma: PrismaService,
-    @Inject(forwardRef(() => ConsultationsService))
-    private consultations: ConsultationsService,
-    private localStorage: LocalStorageService,
-    private aiService: AiService,
-  ) {
-    this.client = twilio(this.apiKeySid, this.apiKeySecret, {
-      accountSid: this.accountSid,
-    });
+    private readonly prisma: PrismaService,
+    private readonly consultationsService: ConsultationsService,
+    private readonly localStorage: LocalStorageService,
+    private readonly aiService: AiService,
+    private readonly videoCallService: VideoCallService,
+    private readonly voiceCallService: VoiceCallService,
+  ) {}
+
+  onModuleInit() {
+    // Auto-fail / auto-complete scheduled sessions based on scheduled_end_time.
+    this.autoEndTimer = setInterval(() => {
+      void this.runAutoEndCycle();
+    }, 30_000);
+  }
+
+  onModuleDestroy() {
+    if (this.autoEndTimer) {
+      clearInterval(this.autoEndTimer);
+      this.autoEndTimer = null;
+    }
+  }
+
+  private getProvider(mode: ConsultationMode) {
+    if (mode === ConsultationMode.VOICE) return this.voiceCallService;
+    return this.videoCallService;
   }
 
   private runInBackground(taskName: string, job: () => Promise<void>, delayMs = 0) {
@@ -48,218 +68,53 @@ export class TwilioService {
     }, delayMs);
   }
 
-  private normalizeClientIp(ip?: string | null): string | null {
-    if (!ip || typeof ip !== 'string') return null;
-
-    let value = ip.trim();
-    if (!value) return null;
-
-    if (value.startsWith('::ffff:')) {
-      value = value.slice(7);
-    }
-
-    if (value.includes('.') && value.includes(':')) {
-      value = value.split(':')[0];
-    }
-
-    if (this.isPrivateIp(value)) return null;
-
-    return value;
-  }
-
-  private isPrivateIp(ip: string): boolean {
-    if (!ip) return true;
-
-    if (ip === '::1' || ip.startsWith('fe80:') || ip.startsWith('fd') || ip.startsWith('fc')) {
-      return true;
-    }
-
-    if (ip.startsWith('127.')) return true;
-    if (ip.startsWith('10.')) return true;
-    if (ip.startsWith('192.168.')) return true;
-    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return true;
-
-    return false;
-  }
-
-  private hasPatientLocation(c: any): boolean {
-    return !!(
-      c?.patientCity ||
-      c?.patientProvince ||
-      c?.patientCountry ||
-      c?.patientCountryCode
-    );
-  }
-
-  private async resolveLocationFromIp(ip: string): Promise<{
-    city?: string | null;
-    region?: string | null;
-    country?: string | null;
-    countryCode?: string | null;
-    latitude?: number | null;
-    longitude?: number | null;
-  } | null> {
-    if (typeof fetch !== 'function') return null;
-
-    try {
-      const response = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, {
-        headers: {
-          'User-Agent': 'telemedicine-app',
-        },
-      });
-
-      if (!response.ok) return null;
-
-      const data: any = await response.json();
-      if (!data || data.error) return null;
-
-      const latitudeRaw = (data as any).latitude;
-      const longitudeRaw = (data as any).longitude;
-      const latitude =
-        typeof latitudeRaw === 'number'
-          ? latitudeRaw
-          : Number.parseFloat(String(latitudeRaw));
-      const longitude =
-        typeof longitudeRaw === 'number'
-          ? longitudeRaw
-          : Number.parseFloat(String(longitudeRaw));
-
-      return {
-        city: typeof data.city === 'string' ? data.city : null,
-        region: typeof data.region === 'string' ? data.region : null,
-        country: typeof data.country_name === 'string' ? data.country_name : null,
-        countryCode: typeof data.country_code === 'string' ? data.country_code : null,
-        latitude: Number.isFinite(latitude) ? latitude : null,
-        longitude: Number.isFinite(longitude) ? longitude : null,
-      };
-    } catch (error: any) {
-      this.logger.warn(`ip lookup failed ip=${ip} message=${error?.message || String(error)}`);
-      return null;
-    }
-  }
-
-  private async tryUpdatePatientLocation(
-    consultationId: string,
-    clientIp?: string | null,
-  ) {
-    const ip = this.normalizeClientIp(clientIp);
-    if (!ip) return;
-
-    const location = await this.resolveLocationFromIp(ip);
-    if (!location) return;
-
-    await this.prisma.consultation.update({
-      where: { id: consultationId },
-      data: {
-        ...(location.countryCode ? { patientCountryCode: location.countryCode } : {}),
-        ...(location.country ? { patientCountry: location.country } : {}),
-        ...(location.region ? { patientProvince: location.region } : {}),
-        ...(location.city ? { patientCity: location.city } : {}),
-        ...(typeof location.latitude === 'number'
-          ? { patientLatitude: location.latitude }
-          : {}),
-        ...(typeof location.longitude === 'number'
-          ? { patientLongitude: location.longitude }
-          : {}),
-      },
-    });
-  }
-
-  private generateVideoJwt(identity: string, roomName: string) {
-    const AccessToken = twilio.jwt.AccessToken;
-    const VideoGrant = AccessToken.VideoGrant;
-
-    const token = new AccessToken(
-      this.accountSid,
-      this.apiKeySid,
-      this.apiKeySecret,
-      {
-        identity,
-        ttl: 60 * 60,
-      },
-    );
-
-    token.addGrant(new VideoGrant({ room: roomName }));
-    return token.toJwt();
-  }
-
-  private assertJoinable(c: any) {
-    if (c.expiresAt && c.expiresAt.getTime() < Date.now()) {
-      throw new ForbiddenException('Consultation expired');
-    }
-
-    if (['DONE', 'FAILED', 'EXPIRED'].includes(c.status)) {
-      throw new ForbiddenException('Consultation not joinable');
-    }
-
-    if (c.status === 'PROCESSING') {
-      throw new ForbiddenException('Consultation already ended');
-    }
-  }
-
-  private upsertCallSession(params: {
-    consultationId: string;
-    doctorId?: string | null;
-    roomSid?: string | null;
-    roomName: string;
-    doctorIdentity?: string | null;
-    patientIdentity?: string | null;
-    patientName?: string | null;
-    recordingEnabled?: boolean;
+  private assertJoinWindow(session: {
+    sessionType: SessionType;
+    sessionStatus: SessionStatus;
+    scheduledStartTime: Date;
+    scheduledEndTime: Date | null;
   }) {
-    return this.prisma.callSession.upsert({
-      where: { consultationId: params.consultationId },
-      update: {
-        doctorId: params.doctorId ?? undefined,
-        roomSid: params.roomSid ?? undefined,
-        roomName: params.roomName,
-        doctorIdentity: params.doctorIdentity ?? undefined,
-        patientIdentity: params.patientIdentity ?? undefined,
-        patientName: params.patientName ?? undefined,
-        recordingEnabled: params.recordingEnabled ?? true,
-      },
-      create: {
-        consultationId: params.consultationId,
-        doctorId: params.doctorId ?? undefined,
-        roomSid: params.roomSid ?? undefined,
-        roomName: params.roomName,
-        doctorIdentity: params.doctorIdentity ?? undefined,
-        patientIdentity: params.patientIdentity ?? undefined,
-        patientName: params.patientName ?? undefined,
-        recordingEnabled: params.recordingEnabled ?? true,
-        status: 'STARTED',
-      },
-    });
-  }
-
-  private async ensureRoomAndPersistSid(consultationId: string, roomName: string) {
-    let room: any = null;
-
-    try {
-      room = await this.client.video.v1.rooms(roomName).fetch();
-
-      if (room?.status === 'completed') {
-        throw new BadRequestException('Room already completed');
-      }
-    } catch (error: any) {
-      if (error?.status === 404 || error?.code === 20404 || !room) {
-        room = await this.client.video.v1.rooms.create({
-          uniqueName: roomName,
-          type: 'group',
-          maxParticipants: 2,
-          statusCallback: this.statusCallbackUrl,
-          statusCallbackMethod: 'POST',
-          recordParticipantsOnConnect: true,
-          emptyRoomTimeout: 5,
-          unusedRoomTimeout: 5,
-        });
-      } else {
-        throw error;
-      }
+    if (session.sessionStatus === 'COMPLETED' || session.sessionStatus === 'FAILED') {
+      throw new ForbiddenException('Session sudah ditutup');
     }
 
-    await this.prisma.consultation.update({
-      where: { id: consultationId },
+    if (session.sessionType === SessionType.INSTANT) return;
+
+    if (!session.scheduledEndTime) {
+      throw new BadRequestException('scheduled_end_time wajib untuk SCHEDULED');
+    }
+
+    const now = Date.now();
+    const startMs = session.scheduledStartTime.getTime();
+    const endMs = session.scheduledEndTime.getTime();
+
+    if (now < startMs || now >= endMs) {
+      throw new ForbiddenException(
+        'Belum masuk window join atau session sudah melewati end time',
+      );
+    }
+  }
+
+  private calculateDuration(startedAt: Date | null, endedAt: Date) {
+    if (!startedAt) return { durationSec: 0, durationMinutes: 1 };
+    const diffSec = Math.max(
+      0,
+      Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000),
+    );
+    const diffMin = Math.max(1, Math.ceil(diffSec / 60));
+    return { durationSec: diffSec, durationMinutes: diffMin };
+  }
+
+  private async ensureRoom(session: {
+    consultationMode: ConsultationMode;
+    roomName: string;
+    sessionId: string;
+  }) {
+    const provider = this.getProvider(session.consultationMode);
+    const room = await provider.ensureRoom(session.roomName, this.statusCallbackUrl);
+
+    await this.prisma.consultationSession.update({
+      where: { sessionId: session.sessionId },
       data: {
         twilioRoomSid: room.sid ?? undefined,
       },
@@ -268,346 +123,449 @@ export class TwilioService {
     return room;
   }
 
-  async doctorToken(doctorId: string, consultationId: string) {
-    const c = await this.prisma.consultation.findUnique({
-      where: { id: consultationId },
+  private async runAutoEndCycle() {
+    if (this.autoEndRunning) return;
+    this.autoEndRunning = true;
+
+    try {
+      const now = new Date();
+      const dueSessions = await this.prisma.consultationSession.findMany({
+        where: {
+          sessionType: 'SCHEDULED',
+          sessionStatus: {
+            in: ['CREATED', 'IN_CALL'],
+          },
+          scheduledEndTime: {
+            not: null,
+            lte: now,
+          },
+        },
+        select: {
+          sessionId: true,
+          doctorId: true,
+          doctorJoinedAt: true,
+          patientJoinedAt: true,
+        },
+      });
+
+      for (const session of dueSessions) {
+        if (session.doctorJoinedAt && session.patientJoinedAt) {
+          await this.completeSessionInternal(
+            session.sessionId,
+            session.doctorId,
+            'AUTO_END_COMPLETED',
+            true,
+          );
+        } else {
+          await this.failSessionInternal(session.sessionId, 'AUTO_END_FAILED', true);
+        }
+      }
+    } catch (error: any) {
+      this.logger.error(`auto-end cycle failed: ${error?.message || error}`);
+    } finally {
+      this.autoEndRunning = false;
+    }
+  }
+
+  private async completeSessionInternal(
+    sessionId: string,
+    doctorId: string,
+    action: string,
+    isSystem: boolean,
+  ) {
+    const session = await this.prisma.consultationSession.findUnique({
+      where: { sessionId },
       include: {
         doctor: true,
-        callSession: true,
       },
     });
 
-    if (!c) throw new NotFoundException('Consultation tidak ditemukan');
-    if (c.doctorId !== doctorId) throw new ForbiddenException('Bukan milik dokter ini');
-
-    this.assertJoinable(c);
-
-    const room = await this.ensureRoomAndPersistSid(c.id, c.roomName);
-
-    const identity = c.doctor.twilioIdentity;
-    if (!identity) {
-      throw new BadRequestException('Twilio identity belum tersedia untuk dokter ini');
-    }
-    const token = this.generateVideoJwt(identity, c.roomName);
-
-    await this.prisma.$transaction([
-      this.prisma.consultation.update({
-        where: { id: c.id },
-        data: {
-          status: c.status === 'CREATED' ? 'WAITING' : c.status,
-          twilioRoomSid: room.sid,
-        },
-      }),
-      this.upsertCallSession({
-        consultationId: c.id,
-        doctorId: c.doctorId,
-        roomSid: room.sid,
-        roomName: c.roomName,
-        doctorIdentity: identity,
-        patientIdentity: c.patientIdentity,
-        patientName: c.patientName,
-        recordingEnabled: true,
-      }),
-    ]);
-
-    return {
-      token,
-      roomName: c.roomName,
-      identity,
-      consultationId: c.id,
-    };
-  }
-
-  async guestToken(linkToken: string, displayName: string, clientIp?: string | null) {
-    const c = await this.consultations.getByLinkToken(linkToken);
-
-    this.assertJoinable(c);
-
-    const digest = createHash('sha256').update(linkToken).digest('hex').slice(0, 12);
-    const identity = `patient_${c.id}_${digest}`.slice(0, 128);
-    const normalizedName = displayName.trim().slice(0, 50);
-    const patientName = normalizedName;
-
-    await this.consultations.lockPatientIfNeeded(c.id, identity, patientName);
-
-    if (!this.hasPatientLocation(c)) {
-      await this.tryUpdatePatientLocation(c.id, clientIp);
-    }
-
-    if (patientName && patientName !== c.patientName) {
-      await this.prisma.consultation.update({
-        where: { id: c.id },
-        data: { patientName },
-      });
-    }
-
-    const room = await this.ensureRoomAndPersistSid(c.id, c.roomName);
-    const token = this.generateVideoJwt(identity, c.roomName);
-
-    await this.upsertCallSession({
-      consultationId: c.id,
-      doctorId: c.doctorId,
-      roomSid: room.sid,
-      roomName: c.roomName,
-      doctorIdentity: c.doctor.twilioIdentity ?? undefined,
-      patientIdentity: identity,
-      patientName,
-      recordingEnabled: true,
-    }); 
-
-    return {
-      token,
-      roomName: c.roomName,
-      identity,
-      consultationId: c.id,
-      doctorName: c.doctor.name ?? 'Doctor',
-      displayName: normalizedName,
-    };
-  }
-
-  async completeConsultationRoom(consultationId: string, doctorId: string) {
-      const consultation = await this.prisma.consultation.findUnique({
-        where: { id: consultationId },
-        include: {
-          doctor: true,
-          callSession: true,
-        },
-      });
-
-      if (!consultation) {
-        throw new NotFoundException('Consultation tidak ditemukan');
-      }
-
-      if (consultation.doctorId !== doctorId) {
-        throw new ForbiddenException('Bukan milik dokter ini');
-      }
-
-      if (!consultation.twilioRoomSid) {
-        throw new BadRequestException('Twilio room SID belum ada');
-      }
-
-      if (['DONE', 'FAILED', 'EXPIRED'].includes(consultation.status)) {
-        throw new BadRequestException('Consultation sudah selesai');
-      }
-
-      try {
-        await this.client.video.v1.rooms(consultation.twilioRoomSid).update({
-          status: 'completed',
-        });
-      } catch (error: any) {
-        this.logger.warn(
-          `complete room warning consultationId=${consultationId} message=${error?.message}`,
-        );
-      }
-
-      await this.prisma.$transaction([
-        this.prisma.consultation.update({
-          where: { id: consultation.id },
-          data: {
-            status: 'DONE',
-            endedAt: consultation.endedAt ?? new Date(),
-          },
-        }),
-        this.prisma.callSession.updateMany({
-          where: { consultationId: consultation.id },
-          data: {
-            endedAt: new Date(),
-          },
-        }),
-        this.prisma.consultationNote.upsert({
-          where: { consultationId: consultation.id },
-          update: {
-            doctorId: consultation.doctorId,
-            aiStatus: 'PENDING',
-            aiError: null,
-          },
-          create: {
-            consultationId: consultation.id,
-            doctorId: consultation.doctorId,
-            aiStatus: 'PENDING',
-            aiError: null,
-          },
-        }),
-      ]);
-
-      this.runInBackground(
-        `ai-summary:${consultation.id}`,
-        async () => {
-          await this.aiService.processConsultationFromTranscript(consultation.id);
-        },
-        2000,
-      );
-
+    if (!session) throw new NotFoundException('Session tidak ditemukan');
+    if (session.sessionStatus === 'COMPLETED' || session.sessionStatus === 'FAILED') {
       return {
         success: true,
-        consultationId: consultation.id,
-        roomSid: consultation.twilioRoomSid,
-        status: 'DONE',
-        aiStatus: 'PENDING',
+        sessionId,
+        status: session.sessionStatus,
       };
+    }
+
+    const endedAt = new Date();
+
+    if (session.twilioRoomSid) {
+      try {
+        await this.videoCallService.completeRoom(session.twilioRoomSid);
+      } catch (error: any) {
+        this.logger.warn(
+          `complete room warning sessionId=${sessionId} message=${error?.message || error}`,
+        );
+      }
+    }
+
+    const baseStart = session.startedAt ?? session.doctorJoinedAt ?? endedAt;
+    const { durationMinutes, durationSec } = this.calculateDuration(baseStart, endedAt);
+
+    const updated = await this.prisma.consultationSession.update({
+      where: { sessionId },
+      data: {
+        sessionStatus: 'COMPLETED',
+        endedAt,
+        durationMinutes,
+        durationSec,
+        ...(session.sessionType === 'INSTANT' && !session.scheduledEndTime
+          ? {
+              scheduledEndTime: endedAt,
+            }
+          : {}),
+      },
+    });
+
+    await this.prisma.consultationNote.upsert({
+      where: { consultationSessionId: updated.sessionId },
+      update: {
+        doctorId: session.doctorId,
+        aiStatus: 'PENDING',
+        aiError: null,
+      },
+      create: {
+        consultationSessionId: updated.sessionId,
+        doctorId: session.doctorId,
+        patientId: session.patientId,
+        aiStatus: 'PENDING',
+        aiError: null,
+      },
+    });
+
+    await this.consultationsService.createAudit({
+      consultationSessionId: session.sessionId,
+      action,
+      actorUserId: isSystem ? null : doctorId,
+      actorRole: isSystem ? null : UserRole.DOCTOR,
+      previousStatus: session.sessionStatus,
+      newStatus: SessionStatus.COMPLETED,
+      metadata: {
+        durationMinutes,
+        auto: isSystem,
+      },
+    });
+
+    this.runInBackground(
+      `ai-summary:${session.sessionId}`,
+      async () => {
+        await this.aiService.processConsultationFromTranscript(session.sessionId);
+      },
+      1500,
+    );
+
+    return {
+      success: true,
+      sessionId: session.sessionId,
+      roomSid: session.twilioRoomSid,
+      status: 'COMPLETED',
+      aiStatus: 'PENDING',
+    };
   }
 
-  async listRecordingsByRoomSid(roomSid: string) {
-    return this.client.video.v1.rooms(roomSid).recordings.list({ limit: 100 });
+  private async failSessionInternal(sessionId: string, action: string, isSystem: boolean) {
+    const session = await this.prisma.consultationSession.findUnique({
+      where: { sessionId },
+      select: {
+        sessionId: true,
+        sessionStatus: true,
+        scheduledEndTime: true,
+        twilioRoomSid: true,
+      },
+    });
+
+    if (!session) throw new NotFoundException('Session tidak ditemukan');
+    if (session.sessionStatus === 'COMPLETED' || session.sessionStatus === 'FAILED') {
+      return;
+    }
+
+    if (session.twilioRoomSid) {
+      try {
+        await this.videoCallService.completeRoom(session.twilioRoomSid);
+      } catch (error: any) {
+        this.logger.warn(
+          `complete room on fail warning sessionId=${sessionId} message=${error?.message || error}`,
+        );
+      }
+    }
+
+    await this.prisma.consultationSession.update({
+      where: { sessionId },
+      data: {
+        sessionStatus: 'FAILED',
+        endedAt: session.scheduledEndTime ?? new Date(),
+        durationMinutes: null,
+        durationSec: null,
+      },
+    });
+
+    await this.consultationsService.createAudit({
+      consultationSessionId: session.sessionId,
+      action,
+      actorUserId: null,
+      actorRole: null,
+      previousStatus: session.sessionStatus,
+      newStatus: SessionStatus.FAILED,
+      metadata: {
+        auto: isSystem,
+      },
+    });
   }
 
-  async createComposition(roomSid: string) {
-    return this.client.video.v1.compositions.create({
-      roomSid,
-      audioSources: ['*'],
-      format: 'mp4',
-      resolution: '1280x720',
-      videoLayout: {
-        grid: {
-          video_sources: ['*'],
+  async markSessionFailedBySystem(sessionId: string, action = 'AUTO_END_FAILED') {
+    return this.failSessionInternal(sessionId, action, true);
+  }
+
+  async markSessionCompletedBySystem(
+    sessionId: string,
+    doctorId: string,
+    action = 'AUTO_END_COMPLETED',
+  ) {
+    return this.completeSessionInternal(sessionId, doctorId, action, true);
+  }
+
+  async doctorToken(doctorId: string, sessionId: string) {
+    const session = await this.prisma.consultationSession.findUnique({
+      where: { sessionId },
+      include: {
+        doctor: {
+          include: {
+            doctorProfile: {
+              select: {
+                license: true,
+              },
+            },
+          },
         },
       },
-      statusCallback: this.statusCallbackUrl,
-      statusCallbackMethod: 'POST',
-    });
-  }
-
-  async tryCreateComposition(roomSid: string) {
-    const callSession = await this.prisma.callSession.findFirst({
-      where: { roomSid },
-      include: { consultation: true },
     });
 
-    if (!callSession) {
-      this.logger.warn(`CallSession not found for roomSid=${roomSid}`);
-      return null;
-    }
+    if (!session) throw new NotFoundException('Session tidak ditemukan');
 
-    if (callSession.compositionSid) {
-      this.logger.log(`Composition already exists for roomSid=${roomSid}`);
-      return null;
-    }
-
-    const recordings = await this.listRecordingsByRoomSid(roomSid);
-
-    if (!recordings.length) {
-      this.logger.warn(`No recordings found for roomSid=${roomSid}`);
-      return null;
-    }
-
-    const hasPending = recordings.some(
-      (recording: any) =>
-        !['completed', 'failed', 'deleted'].includes(recording.status),
-    );
-
-    if (hasPending) {
-      this.logger.log(`Recordings still processing for roomSid=${roomSid}`);
-      return null;
-    }
-
-    const completedRecordings = recordings.filter(
-      (recording: any) => recording.status === 'completed',
-    );
-
-    if (!completedRecordings.length) {
-      await this.prisma.$transaction([
-        this.prisma.callSession.update({
-          where: { id: callSession.id },
-          data: {
-            status: 'FAILED',
-            recordingStatus: 'failed',
-            errorMessage: 'No completed recordings found',
-          },
-        }),
-        this.prisma.consultation.update({
-          where: { id: callSession.consultationId },
-          data: {
-            status: 'FAILED',
-          },
-        }),
-      ]);
-
-      return null;
-    }
-
-    const composition = await this.createComposition(roomSid);
-
-    await this.prisma.callSession.update({
-      where: { id: callSession.id },
-      data: {
-        compositionSid: composition.sid,
-        compositionStatus: composition.status ?? 'enqueued',
+    await this.consultationsService.createAudit({
+      consultationSessionId: session.sessionId,
+      action: 'DOCTOR_JOIN_ATTEMPT',
+      actorUserId: doctorId,
+      actorRole: UserRole.DOCTOR,
+      previousStatus: session.sessionStatus,
+      newStatus: session.sessionStatus,
+      metadata: {
+        consultationMode: session.consultationMode,
       },
     });
 
-    return composition;
-  }
+    if (session.doctorId !== doctorId) {
+      await this.consultationsService.createAudit({
+        consultationSessionId: session.sessionId,
+        action: 'DOCTOR_JOIN_DENIED',
+        actorUserId: doctorId,
+        actorRole: UserRole.DOCTOR,
+        previousStatus: session.sessionStatus,
+        newStatus: session.sessionStatus,
+        metadata: {
+          reason: 'NOT_ASSIGNED_DOCTOR',
+        },
+      });
+      throw new ForbiddenException('Bukan session dokter ini');
+    }
 
-  async getCompositionMediaUrl(compositionSid: string, ttl = 3600) {
-    const response = await this.client.request({
-      method: 'GET',
-      uri: `https://video.twilio.com/v1/Compositions/${compositionSid}/Media?Ttl=${ttl}`,
+    if (!session.doctor.doctorProfile?.license?.trim()) {
+      await this.consultationsService.createAudit({
+        consultationSessionId: session.sessionId,
+        action: 'DOCTOR_JOIN_DENIED',
+        actorUserId: doctorId,
+        actorRole: UserRole.DOCTOR,
+        previousStatus: session.sessionStatus,
+        newStatus: session.sessionStatus,
+        metadata: {
+          reason: 'DOCTOR_LICENSE_EMPTY',
+        },
+      });
+      throw new ForbiddenException('Dokter tanpa license tidak bisa join');
+    }
+
+    this.assertJoinWindow(session);
+
+    if (session.doctorJoinedAt) {
+      await this.consultationsService.createAudit({
+        consultationSessionId: session.sessionId,
+        action: 'DOCTOR_JOIN_DENIED',
+        actorUserId: doctorId,
+        actorRole: UserRole.DOCTOR,
+        previousStatus: session.sessionStatus,
+        newStatus: session.sessionStatus,
+        metadata: {
+          reason: 'DOCTOR_ALREADY_JOINED',
+        },
+      });
+      throw new ForbiddenException('Dokter sudah join pada session ini');
+    }
+
+    const identity = session.doctor.twilioIdentity;
+    if (!identity) {
+      throw new BadRequestException('Twilio identity dokter belum tersedia');
+    }
+
+    await this.ensureRoom(session);
+
+    const now = new Date();
+    const startedAt = !session.startedAt && session.patientJoinedAt ? now : session.startedAt;
+
+    await this.prisma.consultationSession.update({
+      where: { sessionId: session.sessionId },
+      data: {
+        doctorIdentity: identity,
+        doctorJoinedAt: now,
+        sessionStatus: 'IN_CALL',
+        startedAt: startedAt ?? undefined,
+      },
     });
 
-    const body = response.body as { redirect_to?: string };
+    await this.consultationsService.createAudit({
+      consultationSessionId: session.sessionId,
+      action: 'DOCTOR_JOIN_SUCCESS',
+      actorUserId: doctorId,
+      actorRole: UserRole.DOCTOR,
+      previousStatus: session.sessionStatus,
+      newStatus: SessionStatus.IN_CALL,
+      metadata: {
+        consultationMode: session.consultationMode,
+      },
+    });
 
-    if (!body?.redirect_to) {
-      throw new NotFoundException('Composition media URL not found');
+    const provider = this.getProvider(session.consultationMode);
+    const token = provider.generateToken(identity, session.roomName);
+
+    return {
+      token,
+      roomName: session.roomName,
+      identity,
+      sessionId: session.sessionId,
+      consultationMode: session.consultationMode,
+      sessionType: session.sessionType,
+    };
+  }
+
+  async patientToken(patientId: string, sessionId: string, _clientIp?: string | null) {
+    const session = await this.prisma.consultationSession.findUnique({
+      where: { sessionId },
+      include: {
+        doctor: true,
+        patient: {
+          include: {
+            patientProfile: true,
+          },
+        },
+      },
+    });
+
+    if (!session) throw new NotFoundException('Session tidak ditemukan');
+    if (session.patientId !== patientId) {
+      throw new ForbiddenException('Bukan session patient ini');
     }
 
-    return body.redirect_to;
+    this.assertJoinWindow(session);
+
+    if (session.patientJoinedAt) {
+      throw new ForbiddenException('Patient sudah join pada session ini');
+    }
+
+    await this.ensureRoom(session);
+
+    const identity = `patient_${session.sessionId}_${patientId.slice(0, 8)}`.slice(0, 128);
+    const patientName =
+      session.patient.patientProfile?.fullName ??
+      session.patient.name ??
+      'Patient';
+
+    const now = new Date();
+    const startedAt = !session.startedAt && session.doctorJoinedAt ? now : session.startedAt;
+
+    await this.prisma.consultationSession.update({
+      where: { sessionId: session.sessionId },
+      data: {
+        patientIdentity: identity,
+        patientName,
+        patientJoinedAt: now,
+        sessionStatus: 'IN_CALL',
+        startedAt: startedAt ?? undefined,
+      },
+    });
+
+    await this.consultationsService.createAudit({
+      consultationSessionId: session.sessionId,
+      action: 'PATIENT_JOIN_SUCCESS',
+      actorUserId: patientId,
+      actorRole: UserRole.PATIENT,
+      previousStatus: session.sessionStatus,
+      newStatus: SessionStatus.IN_CALL,
+      metadata: {
+        consultationMode: session.consultationMode,
+      },
+    });
+
+    const provider = this.getProvider(session.consultationMode);
+    const token = provider.generateToken(identity, session.roomName);
+
+    return {
+      token,
+      roomName: session.roomName,
+      identity,
+      sessionId: session.sessionId,
+      doctorName: session.doctor.name ?? 'Doctor',
+      patientName,
+      consultationMode: session.consultationMode,
+      sessionType: session.sessionType,
+    };
   }
 
-  async getCallSessionResult(doctorId: string, consultationId: string) {
-  const consultation = await this.prisma.consultation.findFirst({
-    where: {
-      id: consultationId,
-      doctorId,
-    },
-    include: {
-      callSession: true,
-    },
-  });
-
-  if (!consultation) {
-    throw new NotFoundException('Consultation tidak ditemukan');
+  async completeConsultationRoom(sessionId: string, doctorId: string) {
+    return this.completeSessionInternal(sessionId, doctorId, 'DOCTOR_END_CALL', false);
   }
 
-  if (!consultation.callSession) {
-    throw new NotFoundException('Call session belum ada');
-  }
+  async getCallSessionResult(doctorId: string, sessionId: string) {
+    const session = await this.prisma.consultationSession.findFirst({
+      where: {
+        sessionId,
+        doctorId,
+      },
+    });
 
-  let playableUrl: string | null = null;
+    if (!session) throw new NotFoundException('Session tidak ditemukan');
 
-  if (consultation.callSession.compositionSid) {
-    try {
-      playableUrl = await this.getCompositionMediaUrl(
-        consultation.callSession.compositionSid,
+    let playableUrl: string | null = session.mediaUrl ?? null;
+    if (!playableUrl && session.compositionSid) {
+      playableUrl = await this.videoCallService.getCompositionMediaUrl(
+        session.compositionSid,
         3600,
       );
-    } catch {
-      playableUrl = null;
     }
+
+    return {
+      sessionId: session.sessionId,
+      sessionStatus: session.sessionStatus,
+      consultationMode: session.consultationMode,
+      consultationSession: session,
+      playableUrl,
+    };
   }
 
-  return {
-    consultationId: consultation.id,
-    consultationStatus: consultation.status,
-    callSession: consultation.callSession,
-    playableUrl,
-  };
-}
-
   async saveTranscription(doctorId: string, payload: VideoTranscriptionDto) {
-    const consultationId = payload.consultationId?.trim();
+    const sessionId = payload.sessionId?.trim();
     const transcription = payload.transcription?.trim();
 
-    if (!consultationId) {
-      throw new BadRequestException('consultationId wajib');
+    if (!sessionId) {
+      throw new BadRequestException('sessionId wajib');
     }
-
     if (!transcription) {
       return { success: true, ignored: true };
     }
 
-    const consultation = await this.prisma.consultation.findFirst({
+    const session = await this.prisma.consultationSession.findFirst({
       where: {
-        id: consultationId,
+        sessionId,
         doctorId,
       },
       include: {
@@ -615,20 +573,20 @@ export class TwilioService {
       },
     });
 
-    if (!consultation) {
-      throw new NotFoundException('Consultation tidak ditemukan');
+    if (!session) {
+      throw new NotFoundException('Session tidak ditemukan');
     }
 
-    const existing = consultation.consultationNote?.transcriptRaw ?? '';
-    const currentStatus = String(consultation.consultationNote?.aiStatus ?? '').toUpperCase();
+    const existing = session.consultationNote?.transcriptRaw ?? '';
+    const currentStatus = String(session.consultationNote?.aiStatus ?? '').toUpperCase();
     const nextStatus =
       currentStatus === 'SUMMARIZING' || currentStatus === 'SUCCESS'
-        ? consultation.consultationNote?.aiStatus ?? null
+        ? session.consultationNote?.aiStatus ?? null
         : 'TRANSCRIBING';
     const nextTranscript = existing ? `${existing}\n${transcription}` : transcription;
 
     await this.prisma.consultationNote.upsert({
-      where: { consultationId },
+      where: { consultationSessionId: sessionId },
       update: {
         doctorId,
         transcriptRaw: nextTranscript,
@@ -636,8 +594,9 @@ export class TwilioService {
         ...(nextStatus ? { aiStatus: nextStatus, aiError: null } : {}),
       },
       create: {
-        consultationId,
+        consultationSessionId: sessionId,
         doctorId,
+        patientId: session.patientId,
         transcriptRaw: nextTranscript,
         transcribedAt: new Date(),
         aiStatus: nextStatus ?? 'TRANSCRIBING',
@@ -648,25 +607,69 @@ export class TwilioService {
     return { success: true };
   }
 
-async downloadCompositionToLocal(compositionSid: string, consultationId: string) {
-  const mediaUrl = await this.getCompositionMediaUrl(compositionSid, 3600);
+  async tryCreateComposition(roomSid: string) {
+    const session = await this.prisma.consultationSession.findFirst({
+      where: {
+        twilioRoomSid: roomSid,
+      },
+    });
 
-  const response = await fetch(mediaUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to download composition media: ${response.status}`);
+    if (!session) return null;
+    if (session.compositionSid) return null;
+
+    const recordings = await this.videoCallService.listRecordingsByRoomSid(roomSid);
+    if (!recordings.length) return null;
+
+    const hasPending = recordings.some(
+      (item: any) => !['completed', 'failed', 'deleted'].includes(item.status),
+    );
+    if (hasPending) return null;
+
+    const completed = recordings.some((item: any) => item.status === 'completed');
+    if (!completed) {
+      return null;
+    }
+
+    const composition = await this.videoCallService.createComposition(
+      roomSid,
+      this.statusCallbackUrl,
+    );
+
+    await this.prisma.consultationSession.update({
+      where: { sessionId: session.sessionId },
+      data: {
+        compositionSid: composition.sid,
+        compositionStatus: composition.status ?? 'enqueued',
+      },
+    });
+
+    return composition;
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  async getCompositionMediaUrl(compositionSid: string, ttl = 3600) {
+    const url = await this.videoCallService.getCompositionMediaUrl(compositionSid, ttl);
+    if (!url) {
+      throw new NotFoundException('Composition media URL not found');
+    }
+    return url;
+  }
 
-  const filename = `consultation-${consultationId}-${randomUUID()}.mp4`;
+  async downloadCompositionToLocal(compositionSid: string, sessionId: string) {
+    const mediaUrl = await this.getCompositionMediaUrl(compositionSid, 3600);
+    const response = await fetch(mediaUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to download composition media: ${response.status}`);
+    }
 
-  await this.localStorage.saveFromBuffer(filename, buffer);
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const filename = `session-${sessionId}-${randomUUID()}.mp4`;
 
-  return {
-    filename,
-    publicUrl: this.localStorage.buildPublicUrl(filename),
-  };
+    await this.localStorage.saveFromBuffer(filename, buffer);
+
+    return {
+      filename,
+      publicUrl: this.localStorage.buildPublicUrl(filename),
+    };
+  }
 }
-}
-

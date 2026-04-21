@@ -54,9 +54,9 @@ async function main() {
   await prisma.oauthState.deleteMany();
   await prisma.pendingRegistration.deleteMany();
   await prisma.refreshToken.deleteMany();
+  await prisma.consultationSessionAudit.deleteMany();
   await prisma.consultationNote.deleteMany();
-  await prisma.callSession.deleteMany();
-  await prisma.consultation.deleteMany();
+  await prisma.consultationSession.deleteMany();
   await prisma.doctorProfile.deleteMany();
   await prisma.adminProfile.deleteMany();
   await prisma.patientProfile.deleteMany();

@@ -1,17 +1,13 @@
-import { IsBoolean, IsNumber, IsOptional, IsString, Length } from "class-validator";
+import { IsBoolean, IsNumber, IsOptional, IsString, Length } from 'class-validator';
 
 export class DoctorVideoTokenDto {
   @IsString()
-  consultationId: string;
+  sessionId: string;
 }
 
-export class GuestVideoTokenDto {
+export class PatientVideoTokenDto {
   @IsString()
-  linkToken: string;
-
-  @IsString()
-  @Length(1, 50)
-  displayName: string;
+  sessionId: string;
 
   @IsOptional()
   @IsString()
@@ -21,7 +17,7 @@ export class GuestVideoTokenDto {
 
 export class VideoTranscriptionDto {
   @IsString()
-  consultationId: string;
+  sessionId: string;
 
   @IsString()
   @Length(1, 10000)

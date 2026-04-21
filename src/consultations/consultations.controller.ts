@@ -1,66 +1,104 @@
 import {
-  Controller,
-  Post,
   Body,
-  UseGuards,
+  Controller,
+  ForbiddenException,
   Get,
   Param,
+  Post,
+  Query,
   Req,
+  UseGuards,
 } from '@nestjs/common';
-import { ConsultationsService } from './consultations.service';
-import { CreateConsultationDto } from './dto/consultations.dto';
+import { UserRole } from '@prisma/client';
 import { JwtGuard } from 'src/auth/guards/jwt.guard';
+import {
+  CreateConsultationSessionDto,
+  ListConsultationSessionsQueryDto,
+} from './dto/consultations.dto';
+import { ConsultationsService } from './consultations.service';
 
 @Controller('consultations')
+@UseGuards(JwtGuard)
 export class ConsultationsController {
-  constructor(private consultations: ConsultationsService) {}
+  constructor(private readonly consultations: ConsultationsService) {}
 
-  @UseGuards(JwtGuard)
-  @Post()
-  async create(@Req() req: any, @Body() dto: CreateConsultationDto) {
-    const doctorId = req.user.id;
-
-    const c = await this.consultations.createForDoctor(doctorId, dto);
-
-    const baseUrl = process.env.APP_PUBLIC_BASE_URL || 'http://localhost:3000';
-
-    return {
-      id: c.id,
-      linkToken: c.linkToken,
-      roomName: c.roomName,
-      status: c.status,
-      expiresAt: c.expiresAt,
-      url: `${baseUrl}/consultation/${c.linkToken}`,
-    };
+  private requireRole(actual: UserRole, expected: UserRole) {
+    if (actual !== expected) {
+      throw new ForbiddenException('Role tidak diizinkan untuk endpoint ini');
+    }
   }
 
-  @Get('link/:linkToken')
-  async getByLink(@Param('linkToken') linkToken: string) {
-    const c = await this.consultations.getByLinkToken(linkToken);
-    return {
-      consultationId: c.id,
-      roomName: c.roomName,
-      doctorName: c.doctor.name ?? 'Doctor',
-      status: c.status,
-      expiresAt: c.expiresAt,
-    };
+  @Post('sessions')
+  async createSession(@Req() req: any, @Body() dto: CreateConsultationSessionDto) {
+    this.requireRole(req.user.role, UserRole.ADMIN);
+    return this.consultations.createByAdmin(req.user.id, dto);
   }
 
-  @UseGuards(JwtGuard)
-  @Post(':id/end')
-  async endConsultation(@Req() req: any, @Param('id') id: string) {
-    return this.consultations.endConsultation(req.user.id, id);
+  @Get('sessions/admin')
+  async listAdminSessions(
+    @Req() req: any,
+    @Query() query: ListConsultationSessionsQueryDto,
+  ) {
+    this.requireRole(req.user.role, UserRole.ADMIN);
+    return this.consultations.listAdminSessions(req.user.id, query);
   }
 
-  @UseGuards(JwtGuard)
-  @Get(':id/call-session')
-  async getCallSession(@Req() req: any, @Param('id') id: string) {
-    return this.consultations.getCallSessionResult(req.user.id, id);
+  @Get('sessions/admin/history')
+  async listAdminHistorySessions(
+    @Req() req: any,
+    @Query() query: ListConsultationSessionsQueryDto,
+  ) {
+    this.requireRole(req.user.role, UserRole.ADMIN);
+    return this.consultations.listAdminHistorySessions(req.user.id, query);
   }
 
-  @UseGuards(JwtGuard)
-  @Get(':id/note')
-  async getNote(@Req() req: any, @Param('id') id: string) {
-    return this.consultations.getConsultationNote(req.user.id, id);
+  @Get('sessions/doctor')
+  async listDoctorSessions(
+    @Req() req: any,
+    @Query() query: ListConsultationSessionsQueryDto,
+  ) {
+    this.requireRole(req.user.role, UserRole.DOCTOR);
+    return this.consultations.listDoctorSessions(req.user.id, query);
+  }
+
+  @Get('sessions/patient')
+  async listPatientSessions(
+    @Req() req: any,
+    @Query() query: ListConsultationSessionsQueryDto,
+  ) {
+    this.requireRole(req.user.role, UserRole.PATIENT);
+    return this.consultations.listPatientSessions(req.user.id, query);
+  }
+
+  @Get('sessions/:sessionId')
+  async getSession(@Req() req: any, @Param('sessionId') sessionId: string) {
+    if (req.user.role === UserRole.ADMIN) {
+      return this.consultations.getSessionForAdmin(req.user.id, sessionId);
+    }
+    if (req.user.role === UserRole.DOCTOR) {
+      return this.consultations.getSessionForDoctor(req.user.id, sessionId);
+    }
+    if (req.user.role === UserRole.PATIENT) {
+      return this.consultations.getSessionForPatient(req.user.id, sessionId);
+    }
+    throw new ForbiddenException('Role tidak diizinkan');
+  }
+
+  @Get('sessions/:sessionId/note')
+  async getSessionNote(@Req() req: any, @Param('sessionId') sessionId: string) {
+    this.requireRole(req.user.role, UserRole.DOCTOR);
+    return this.consultations.getConsultationNote(req.user.id, sessionId);
+  }
+
+  @Get('lookups/doctors')
+  async listDoctors(@Req() req: any) {
+    this.requireRole(req.user.role, UserRole.ADMIN);
+    return this.consultations.listDoctorOptions(req.user.id);
+  }
+
+  @Get('lookups/patients')
+  async listPatients(@Req() req: any) {
+    this.requireRole(req.user.role, UserRole.ADMIN);
+    return this.consultations.listPatientOptions(req.user.id);
   }
 }

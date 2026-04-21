@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 import { GetAiResultsQueryDto } from './dto/ai-results.dto';
+import { UserRole } from '@prisma/client';
 
 @Injectable()
 export class AiResultsService {
@@ -44,80 +45,36 @@ export class AiResultsService {
       ...(search
         ? {
             OR: [
+              { summary: { contains: search, mode: 'insensitive' } },
+              { subjective: { contains: search, mode: 'insensitive' } },
+              { objective: { contains: search, mode: 'insensitive' } },
+              { assessment: { contains: search, mode: 'insensitive' } },
+              { plan: { contains: search, mode: 'insensitive' } },
+              { transcriptRaw: { contains: search, mode: 'insensitive' } },
+              { aiStatus: { contains: search, mode: 'insensitive' } },
               {
-                summary: {
-                  contains: search,
-                  mode: 'insensitive',
+                consultationSession: {
+                  sessionId: { contains: search, mode: 'insensitive' },
                 },
               },
               {
-                subjective: {
-                  contains: search,
-                  mode: 'insensitive',
+                consultationSession: {
+                  roomName: { contains: search, mode: 'insensitive' },
                 },
               },
               {
-                objective: {
-                  contains: search,
-                  mode: 'insensitive',
+                consultationSession: {
+                  patientIdentity: { contains: search, mode: 'insensitive' },
                 },
               },
               {
-                assessment: {
-                  contains: search,
-                  mode: 'insensitive',
+                consultationSession: {
+                  patientName: { contains: search, mode: 'insensitive' },
                 },
               },
               {
-                plan: {
-                  contains: search,
-                  mode: 'insensitive',
-                },
-              },
-              {
-                transcriptRaw: {
-                  contains: search,
-                  mode: 'insensitive',
-                },
-              },
-              {
-                aiStatus: {
-                  contains: search,
-                  mode: 'insensitive',
-                },
-              },
-              {
-                consultation: {
-                  roomName: {
-                    contains: search,
-                    mode: 'insensitive',
-                  },
-                },
-              },
-              {
-                consultation: {
-                  patientIdentity: {
-                    contains: search,
-                    mode: 'insensitive',
-                  },
-                },
-              },
-              {
-                consultation: {
-                  patientName: {
-                    contains: search,
-                    mode: 'insensitive',
-                  },
-                },
-              },
-              {
-                consultation: {
-                  doctor: {
-                    name: {
-                      contains: search,
-                      mode: 'insensitive',
-                    },
-                  },
+                consultationSession: {
+                  doctor: { name: { contains: search, mode: 'insensitive' } },
                 },
               },
             ],
@@ -150,31 +107,31 @@ export class AiResultsService {
         : {}),
       orderBy,
       include: {
-        consultation: {
+        consultationSession: {
           select: {
-            id: true,
-            status: true,
+            sessionId: true,
+            sessionStatus: true,
             roomName: true,
             patientName: true,
             patientIdentity: true,
             startedAt: true,
             endedAt: true,
+            durationSec: true,
+            twilioRoomSid: true,
+            doctorIdentity: true,
+            consultationMode: true,
+            sessionType: true,
+            recordingStatus: true,
+            compositionStatus: true,
+            mediaUrl: true,
+            mediaFormat: true,
+            errorMessage: true,
+            createdAt: true,
+            updatedAt: true,
             doctor: {
               select: {
                 id: true,
                 name: true,
-              },
-            },
-            callSession: {
-              select: {
-                id: true,
-                durationSec: true,
-                status: true,
-                roomSid: true,
-                roomName: true,
-                patientIdentity: true,
-                patientName: true,
-                createdAt: true,
               },
             },
           },
@@ -188,22 +145,22 @@ export class AiResultsService {
 
     return {
       data: items.map((item) => {
-        const patientName =
-          item.consultation.patientName ??
-          item.consultation.callSession?.patientName ??
-          null;
+        const patientName = item.consultationSession.patientName ?? null;
 
         return {
           id: item.id,
-          consultationId: item.consultationId,
+          consultationId: item.consultationSessionId,
+          sessionId: item.consultationSessionId,
           doctorId: item.doctorId,
-          doctorName: item.consultation.doctor?.name ?? null,
-          roomName: item.consultation.roomName,
-          patientIdentity: item.consultation.patientIdentity,
+          doctorName: item.consultationSession.doctor?.name ?? null,
+          roomName: item.consultationSession.roomName,
+          patientIdentity: item.consultationSession.patientIdentity,
           patientName,
-          consultationStatus: item.consultation.status,
-          consultationStartedAt: item.consultation.startedAt,
-          consultationEndedAt: item.consultation.endedAt,
+          consultationStatus: item.consultationSession.sessionStatus,
+          consultationMode: item.consultationSession.consultationMode,
+          sessionType: item.consultationSession.sessionType,
+          consultationStartedAt: item.consultationSession.startedAt,
+          consultationEndedAt: item.consultationSession.endedAt,
           summary: item.summary,
           subjective: item.subjective,
           objective: item.objective,
@@ -215,18 +172,16 @@ export class AiResultsService {
           transcribedAt: item.transcribedAt,
           summarizedAt: item.summarizedAt,
           aiModel: item.aiModel,
-          callSession: item.consultation.callSession
-            ? {
-                id: item.consultation.callSession.id,
-                durationSec: item.consultation.callSession.durationSec,
-                status: item.consultation.callSession.status,
-                roomSid: item.consultation.callSession.roomSid,
-                roomName: item.consultation.callSession.roomName,
-                patientIdentity: item.consultation.callSession.patientIdentity,
-                patientName: item.consultation.callSession.patientName ?? null,
-                createdAt: item.consultation.callSession.createdAt,
-              }
-            : null,
+          callSession: {
+            id: item.consultationSession.sessionId,
+            durationSec: item.consultationSession.durationSec,
+            status: item.consultationSession.sessionStatus,
+            roomSid: item.consultationSession.twilioRoomSid,
+            roomName: item.consultationSession.roomName,
+            patientIdentity: item.consultationSession.patientIdentity,
+            patientName: item.consultationSession.patientName ?? null,
+            createdAt: item.consultationSession.createdAt,
+          },
           createdAt: item.createdAt,
           updatedAt: item.updatedAt,
         };
@@ -248,40 +203,31 @@ export class AiResultsService {
         doctorId,
       },
       include: {
-        consultation: {
+        consultationSession: {
           select: {
-            id: true,
-            status: true,
+            sessionId: true,
+            sessionStatus: true,
+            consultationMode: true,
+            sessionType: true,
             roomName: true,
             patientName: true,
             patientIdentity: true,
             startedAt: true,
             endedAt: true,
+            durationSec: true,
+            twilioRoomSid: true,
+            doctorIdentity: true,
+            recordingStatus: true,
+            compositionStatus: true,
+            mediaUrl: true,
+            mediaFormat: true,
+            errorMessage: true,
+            createdAt: true,
+            updatedAt: true,
             doctor: {
               select: {
                 id: true,
                 name: true,
-              },
-            },
-            callSession: {
-              select: {
-                id: true,
-                status: true,
-                roomSid: true,
-                roomName: true,
-                doctorIdentity: true,
-                patientIdentity: true,
-                patientName: true,
-                startedAt: true,
-                endedAt: true,
-                recordingStatus: true,
-                compositionStatus: true,
-                mediaUrl: true,
-                mediaFormat: true,
-                durationSec: true,
-                errorMessage: true,
-                createdAt: true,
-                updatedAt: true,
               },
             },
           },
@@ -293,22 +239,31 @@ export class AiResultsService {
       throw new NotFoundException('AI summary tidak ditemukan');
     }
 
-    const patientName =
-      note.consultation.patientName ??
-      note.consultation.callSession?.patientName ??
-      null;
+    await this.prisma.consultationSessionAudit.create({
+      data: {
+        consultationSessionId: note.consultationSessionId,
+        actorUserId: doctorId,
+        actorRole: UserRole.DOCTOR,
+        action: 'DOCTOR_VIEW_SUMMARY',
+        previousStatus: note.consultationSession.sessionStatus,
+        newStatus: note.consultationSession.sessionStatus,
+      },
+    });
 
     return {
       id: note.id,
-      consultationId: note.consultationId,
+      consultationId: note.consultationSessionId,
+      sessionId: note.consultationSessionId,
       doctorId: note.doctorId,
-      doctorName: note.consultation.doctor?.name ?? null,
-      roomName: note.consultation.roomName,
-      patientIdentity: note.consultation.patientIdentity,
-      patientName,
-      consultationStatus: note.consultation.status,
-      consultationStartedAt: note.consultation.startedAt,
-      consultationEndedAt: note.consultation.endedAt,
+      doctorName: note.consultationSession.doctor?.name ?? null,
+      roomName: note.consultationSession.roomName,
+      patientIdentity: note.consultationSession.patientIdentity,
+      patientName: note.consultationSession.patientName ?? null,
+      consultationStatus: note.consultationSession.sessionStatus,
+      consultationMode: note.consultationSession.consultationMode,
+      sessionType: note.consultationSession.sessionType,
+      consultationStartedAt: note.consultationSession.startedAt,
+      consultationEndedAt: note.consultationSession.endedAt,
       summary: note.summary,
       subjective: note.subjective,
       objective: note.objective,
@@ -322,7 +277,25 @@ export class AiResultsService {
       aiModel: note.aiModel,
       createdAt: note.createdAt,
       updatedAt: note.updatedAt,
-      callSession: note.consultation.callSession,
+      callSession: {
+        id: note.consultationSession.sessionId,
+        status: note.consultationSession.sessionStatus,
+        roomSid: note.consultationSession.twilioRoomSid,
+        roomName: note.consultationSession.roomName,
+        doctorIdentity: note.consultationSession.doctorIdentity,
+        patientIdentity: note.consultationSession.patientIdentity,
+        startedAt: note.consultationSession.startedAt,
+        endedAt: note.consultationSession.endedAt,
+        recordingStatus: note.consultationSession.recordingStatus,
+        compositionStatus: note.consultationSession.compositionStatus,
+        mediaUrl: note.consultationSession.mediaUrl,
+        mediaFormat: note.consultationSession.mediaFormat,
+        durationSec: note.consultationSession.durationSec,
+        errorMessage: note.consultationSession.errorMessage,
+        createdAt: note.consultationSession.createdAt,
+        updatedAt: note.consultationSession.updatedAt,
+      },
     };
   }
 }
+

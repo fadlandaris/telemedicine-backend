@@ -1,7 +1,21 @@
-import { Controller, Post, Body, UseGuards, Req, Param, Get } from '@nestjs/common';
-import { TwilioService } from './twilio.service';
-import { DoctorVideoTokenDto, GuestVideoTokenDto, VideoTranscriptionDto } from './dto/twilio.dto';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Param,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { UserRole } from '@prisma/client';
 import { JwtGuard } from 'src/auth/guards/jwt.guard';
+import {
+  DoctorVideoTokenDto,
+  PatientVideoTokenDto,
+  VideoTranscriptionDto,
+} from './dto/twilio.dto';
+import { TwilioService } from './twilio.service';
 
 const getClientIp = (req: any): string | null => {
   const forwarded = req.headers?.['x-forwarded-for'];
@@ -14,80 +28,59 @@ const getClientIp = (req: any): string | null => {
     null;
 
   if (!raw || typeof raw !== 'string') return null;
-
   const first = raw.split(',')[0]?.trim() ?? '';
-  if (!first) return null;
-
-  return first;
-};
-
-const normalizeIp = (ip?: string | null): string | null => {
-  if (!ip || typeof ip !== 'string') return null;
-  let value = ip.trim();
-  if (!value) return null;
-
-  if (value.startsWith('::ffff:')) {
-    value = value.slice(7);
-  }
-
-  if (value.includes('.') && value.includes(':')) {
-    value = value.split(':')[0];
-  }
-
-  return value || null;
-};
-
-const isPrivateIp = (ip?: string | null): boolean => {
-  if (!ip) return true;
-
-  if (ip === '::1' || ip.startsWith('fe80:') || ip.startsWith('fd') || ip.startsWith('fc')) {
-    return true;
-  }
-
-  if (ip.startsWith('127.')) return true;
-  if (ip.startsWith('10.')) return true;
-  if (ip.startsWith('192.168.')) return true;
-  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return true;
-
-  return false;
+  return first || null;
 };
 
 @Controller('twilio')
 export class TwilioController {
-  constructor(private twilio: TwilioService) {}
+  constructor(private readonly twilio: TwilioService) {}
 
   @UseGuards(JwtGuard)
   @Post('video/doctor-token')
   async doctorToken(@Req() req: any, @Body() dto: DoctorVideoTokenDto) {
-    const doctorId = req.user.id;
-    return this.twilio.doctorToken(doctorId, dto.consultationId);
-  }
-
-  @Post('video/guest-token')
-  async guestToken(@Req() req: any, @Body() dto: GuestVideoTokenDto) {
-    const reqIp = normalizeIp(getClientIp(req));
-    const bodyIp = normalizeIp(dto.clientIp);
-
-    const preferredIp = reqIp && !isPrivateIp(reqIp) ? reqIp : bodyIp ?? reqIp;
-
-    return this.twilio.guestToken(dto.linkToken, dto.displayName, preferredIp);
+    if (req.user.role !== UserRole.DOCTOR) {
+      throw new ForbiddenException('Hanya dokter yang boleh join sebagai dokter');
+    }
+    return this.twilio.doctorToken(req.user.id, dto.sessionId);
   }
 
   @UseGuards(JwtGuard)
-  @Post('video/end/:consultationId')
-  async endCall(@Req() req: any, @Param('consultationId') consultationId: string) {
-    return this.twilio.completeConsultationRoom(consultationId, req.user.id);
+  @Post('video/patient-token')
+  async patientToken(@Req() req: any, @Body() dto: PatientVideoTokenDto) {
+    if (req.user.role !== UserRole.PATIENT) {
+      throw new ForbiddenException('Hanya patient yang boleh join sebagai patient');
+    }
+
+    const reqIp = getClientIp(req);
+    return this.twilio.patientToken(req.user.id, dto.sessionId, reqIp ?? dto.clientIp);
   }
 
   @UseGuards(JwtGuard)
-  @Get('video/result/:consultationId')
-  async getCallResult(@Req() req: any, @Param('consultationId') consultationId: string) {
-    return this.twilio.getCallSessionResult(req.user.id, consultationId);
+  @Post('video/end/:sessionId')
+  async endCall(@Req() req: any, @Param('sessionId') sessionId: string) {
+    if (req.user.role !== UserRole.DOCTOR) {
+      throw new ForbiddenException('Hanya dokter yang boleh mengakhiri call');
+    }
+    return this.twilio.completeConsultationRoom(sessionId, req.user.id);
+  }
+
+  @UseGuards(JwtGuard)
+  @Get('video/result/:sessionId')
+  async getCallResult(@Req() req: any, @Param('sessionId') sessionId: string) {
+    if (req.user.role !== UserRole.DOCTOR) {
+      throw new ForbiddenException('Hanya dokter yang bisa melihat result call');
+    }
+    return this.twilio.getCallSessionResult(req.user.id, sessionId);
   }
 
   @UseGuards(JwtGuard)
   @Post('video/transcription')
   async saveTranscription(@Req() req: any, @Body() dto: VideoTranscriptionDto) {
+    if (req.user.role !== UserRole.DOCTOR) {
+      throw new ForbiddenException('Hanya dokter yang boleh kirim transcription');
+    }
     return this.twilio.saveTranscription(req.user.id, dto);
   }
 }
+

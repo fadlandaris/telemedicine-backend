@@ -51,6 +51,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       email = profile.email;
     }
 
-    return { ...user, email }; // nempel di req.user
+    return {
+      id: user.id,
+      sub: payload.sub,
+      email,
+      role: user.role,
+      twilioIdentity: user.twilioIdentity,
+    };
   }
 }

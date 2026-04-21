@@ -25,6 +25,7 @@ export class AuthController {
       password: dto.password,
       ip,
       userAgent: typeof userAgent === "string" ? userAgent : undefined,
+      rememberMe: dto.rememberMe,
     });
 
     // Refresh token via HttpOnly Cookie (recommended)
@@ -33,7 +34,7 @@ export class AuthController {
       sameSite: "lax",
       secure: false, // true kalau https
       path: "/",
-      maxAge: 1000 * 60 * 60 * 24 * 30,
+      maxAge: 1000 * 60 * 60 * 24 * (dto.rememberMe ? 10 : 30),
     });
 
     return {

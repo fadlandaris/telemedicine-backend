@@ -1,4 +1,4 @@
-import { IsString, MinLength } from "class-validator";
+import { IsString, MinLength, IsOptional, IsBoolean } from "class-validator";
 
 // login (email atau phone)
 export class LoginDto {
@@ -8,4 +8,8 @@ export class LoginDto {
   @IsString()
   @MinLength(8)
   password: string;
+
+  @IsOptional()
+  @IsBoolean()
+  rememberMe?: boolean;
 }

@@ -1,4 +1,13 @@
-import { Controller, Logger, Param, Post, Req, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  ForbiddenException,
+  Logger,
+  Param,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { UserRole } from '@prisma/client';
 import { AiService } from './ai.service';
 import { JwtGuard } from 'src/auth/guards/jwt.guard';
 
@@ -8,20 +17,24 @@ export class AiController {
 
   constructor(private readonly aiService: AiService) {}
 
-  @Post('process/:consultationId')
-  async process(@Param('consultationId') consultationId: string) {
-    await this.aiService.processConsultationFromTranscript(consultationId);
+  @Post('process/:sessionId')
+  async process(@Param('sessionId') sessionId: string) {
+    await this.aiService.processConsultationFromTranscript(sessionId);
     return { success: true };
   }
 
   @UseGuards(JwtGuard)
-  @Post('retry/:consultationId')
-  async retry(@Req() req: any, @Param('consultationId') consultationId: string) {
+  @Post('retry/:sessionId')
+  async retry(@Req() req: any, @Param('sessionId') sessionId: string) {
+    if (req.user.role !== UserRole.DOCTOR) {
+      throw new ForbiddenException('Hanya dokter yang dapat retry AI summary');
+    }
+
     void this.aiService
-      .processConsultationFromTranscript(consultationId, req.user.id)
+      .processConsultationFromTranscript(sessionId, req.user.id)
       .catch((err) => {
         this.logger.error(
-          `Manual retry failed consultationId=${consultationId} message=${err?.message || err}`,
+          `Manual retry failed sessionId=${sessionId} message=${err?.message || err}`,
         );
       });
 
