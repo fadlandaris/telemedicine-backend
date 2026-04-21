@@ -1,6 +1,4 @@
 import { PrismaClient } from "@prisma/client";
-import { faker } from "@faker-js/faker";
-import crypto from "crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
 
 const adapter = new PrismaPg({
@@ -9,94 +7,87 @@ const adapter = new PrismaPg({
 
 const prisma = new PrismaClient({ adapter });
 
-function hashPassword(raw: string) {
-  return crypto.createHash("sha256").update(raw).digest("hex");
-}
+const LICENSES = [
+  "12345/SIP-1/2026",
+  "23456/SIP-2/2026",
+  "34567/SIP-3/2026",
+  "45678/SIP-4/2026",
+  "56789/SIP-5/2026",
+  "67890/SIP-6/2026",
+  "78901/SIP-7/2026",
+  "89012/SIP-8/2026",
+  "90123/SIP-9/2026",
+  "01234/SIP-10/2026",
+];
 
-function uniqueIdentity() {
-  return `seed_${crypto.randomBytes(10).toString("hex")}`;
-}
+const ADMIN_IDS = [
+  "101-2024-001",
+  "101-2024-002",
+  "101-2024-003",
+  "101-2024-004",
+  "101-2024-005",
+  "101-2024-006",
+  "101-2024-007",
+  "101-2024-008",
+  "101-2024-009",
+  "101-2024-010",
+];
+
+const MRNS = [
+  "12-34-56",
+  "99-77-70",
+  "01-23-45",
+  "67-89-00",
+  "10-20-30",
+  "11-22-33",
+  "44-55-66",
+  "77-88-99",
+  "98-76-54",
+  "55-44-33",
+];
 
 async function main() {
-  console.log("⏳ Start seeding...");
+  console.log("? Start seeding...");
 
+  await prisma.oauthAccount.deleteMany();
+  await prisma.oauthPending.deleteMany();
+  await prisma.oauthState.deleteMany();
+  await prisma.pendingRegistration.deleteMany();
   await prisma.refreshToken.deleteMany();
-  await prisma.doctor.deleteMany();
+  await prisma.consultationSessionAudit.deleteMany();
+  await prisma.consultationNote.deleteMany();
+  await prisma.consultationSession.deleteMany();
+  await prisma.doctorProfile.deleteMany();
+  await prisma.adminProfile.deleteMany();
+  await prisma.patientProfile.deleteMany();
+  await prisma.user.deleteMany();
+  await prisma.authAuditLog.deleteMany();
 
-  const fixedDoctors = [
-    {
-      email: "doctor1@test.com",
-      password: "Password123!",
-      name: "Dr. Test Satu",
-      phone: "081111111111",
-      twilioIdentity: "seed_doctor_1",
-      isActive: true,
-    },
-    {
-      email: "doctor2@test.com",
-      password: "Password123!",
-      name: "Dr. Test Dua",
-      phone: "082222222222",
-      twilioIdentity: "seed_doctor_2",
-      isActive: true,
-    },
-    {
-      email: "doctor3@test.com",
-      password: "Password123!",
-      name: "Dr. Test Tiga",
-      phone: "083333333333",
-      twilioIdentity: "seed_doctor_3",
-      isActive: true,
-    },
-    {
-      email: "doctor4@test.com",
-      password: "Password123!",
-      name: "Dr. Test Empat",
-      phone: "084444444444",
-      twilioIdentity: "seed_doctor_4",
-      isActive: true,
-    },
-  ];
+  await prisma.licenseWhitelist.deleteMany();
+  await prisma.adminIdWhitelist.deleteMany();
+  await prisma.mrnWhitelist.deleteMany();
 
-  for (const doctor of fixedDoctors) {
-    await prisma.doctor.create({
-      data: {
-        email: doctor.email,
-        passwordHash: hashPassword(doctor.password),
-        name: doctor.name,
-        phone: doctor.phone,
-        twilioIdentity: doctor.twilioIdentity,
-        isActive: doctor.isActive,
-      },
-    });
+  for (const license of LICENSES) {
+    await prisma.licenseWhitelist.create({ data: { license } });
   }
 
-  const count = 100;
-
-  for (let i = 0; i < count; i++) {
-    await prisma.doctor.create({
-      data: {
-        email: faker.internet.email().toLowerCase(),
-        passwordHash: hashPassword("Password123!"),
-        name: faker.person.fullName(),
-        phone: faker.phone.number(),
-        twilioIdentity: uniqueIdentity(),
-        isActive: true,
-      },
-    });
+  for (const adminId of ADMIN_IDS) {
+    await prisma.adminIdWhitelist.create({ data: { adminId } });
   }
 
-  console.log("✅ Seed selesai");
-  console.log("✅ 4 akun dummy tetap + 100 faker");
-  console.log("1. doctor1@test.com / Password123!");
-  console.log("2. doctor2@test.com / Password123!");
-  console.log("3. doctor3@test.com / Password123!");
-  console.log("4. doctor4@test.com / Password123!");
+  for (const mrn of MRNS) {
+    await prisma.mrnWhitelist.create({ data: { mrn } });
+  }
+
+  console.log("? Seed selesai");
+  console.log("? License whitelist: 10 item");
+  console.log("? Admin ID whitelist: 10 item");
+  console.log("? MRN whitelist: 10 item");
 }
 
 main()
   .catch((e) => {
-    console.error("❌ Seed error:", e);
+    console.error("? Seed error:", e);
     process.exit(1);
   })
   .finally(async () => {

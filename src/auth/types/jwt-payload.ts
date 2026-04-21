@@ -1,5 +1,9 @@
+import { UserRole } from "@prisma/client";
+
 export type JwtPayload = {
-  sub: string;           // doctorId
+  id: string;
+  sub: string; // userId
   email: string;
-  twilioIdentity: string;
+  role: UserRole;
+  twilioIdentity?: string;
 };

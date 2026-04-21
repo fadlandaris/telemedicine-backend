@@ -6,34 +6,219 @@ datasource db {
   provider = "postgresql"
 }
 
-model Doctor {
-  id           String  @id @default(uuid())
-  email        String  @unique
-  passwordHash String
-  name         String?
-  phone        String?
+enum UserRole {
+  DOCTOR
+  ADMIN
+  PATIENT
+}
 
-  // Identity unik & immutable untuk Twilio Voice JS SDK
-  twilioIdentity String @unique
+enum OAuthProvider {
+  GOOGLE
+  MICROSOFT
+}
+
+model User {
+  id             String @id @default(uuid())
+  role         UserRole
+  name         String
+
+  // Identity unik & immutable untuk Twilio Voice JS SDK (khusus dokter)
+  twilioIdentity String? @unique
 
   isActive        Boolean   @default(true)
   emailVerifiedAt DateTime?
 
+  doctorProfile DoctorProfile?
+  adminProfile  AdminProfile?
+  patientProfile PatientProfile?
+
   refreshTokens      RefreshToken[]
-  consultations      Consultation[]
-  callSessions       CallSession[]
-  consultationNotes  ConsultationNote[]
+  consultationSessionsAsDoctor  ConsultationSession[]      @relation("ConsultationSessionDoctor")
+  consultationSessionsAsPatient ConsultationSession[]      @relation("ConsultationSessionPatient")
+  consultationSessionsCreated   ConsultationSession[]      @relation("ConsultationSessionCreatedBy")
+  consultationSessionAudits     ConsultationSessionAudit[] @relation("ConsultationSessionActor")
+  consultationNotesAsDoctor  ConsultationNote[] @relation("ConsultationNoteDoctor")
+  consultationNotesAsPatient ConsultationNote[] @relation("ConsultationNotePatient")
+  oauthAccounts      OauthAccount[]
+  authAuditLogs      AuthAuditLog[]
+  pendingEmailChanges PendingEmailChange[]
+  pendingPasswordResets PendingPasswordReset[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([role])
   @@index([isActive])
+}
+
+model DoctorProfile {
+  id       String @id @default(uuid())
+  userId   String @unique
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName String
+  email    String @unique
+  phone    String @unique
+  passwordHash String?
+
+  license  String @unique
+  profilePicture String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([license])
+}
+
+model AdminProfile {
+  id      String @id @default(uuid())
+  userId  String @unique
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName String
+  email    String @unique
+  phone    String @unique
+  passwordHash String?
+
+  adminId String @unique
+  profilePicture String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([adminId])
+}
+
+model PatientProfile {
+  id       String   @id @default(uuid())
+  userId   String   @unique
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName String
+  email    String @unique
+  phone    String @unique
+  passwordHash String?
+
+  bornDate DateTime
+  profilePicture String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model OauthAccount {
+  id              String        @id @default(uuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider        OAuthProvider
+  providerUserId  String
+  email           String?
+  createdAt       DateTime @default(now())
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@map("OAuthAccount")
+}
+
+model OauthState {
+  id         String        @id @default(uuid())
+  provider   OAuthProvider
+  role       UserRole
+  redirectUrl String?
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("OAuthState")
+}
+
+model OauthPending {
+  id             String        @id @default(uuid())
+  provider       OAuthProvider
+  role           UserRole
+  providerUserId String
+  email          String
+  name           String?
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+
+  @@unique([provider, providerUserId])
+  @@index([email])
+  @@index([expiresAt])
+  @@map("OAuthPending")
+}
+
+model PendingRegistration {
+  id           String   @id @default(uuid())
+  role         UserRole
+  email        String
+  phone        String
+  name         String
+  passwordHash String
+
+  license  String?
+  adminId  String?
+  bornDate DateTime?
+
+  tokenHash String  @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([phone])
+  @@index([expiresAt])
+}
+
+model LicenseWhitelist {
+  id        String   @id @default(uuid())
+  license   String   @unique
+  createdAt DateTime @default(now())
+}
+
+model AdminIdWhitelist {
+  id        String   @id @default(uuid())
+  adminId   String   @unique
+  createdAt DateTime @default(now())
+}
+
+model PendingEmailChange {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  newEmail  String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([newEmail])
+}
+
+model PendingPasswordReset {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model MrnWhitelist {
+  id        String   @id @default(uuid())
+  mrn       String   @unique
+  createdAt DateTime @default(now())
 }
 
 model RefreshToken {
   id       String @id @default(uuid())
-  doctorId String
-  doctor   Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   tokenHash String  @unique
   userAgent String?
@@ -48,99 +233,95 @@ model RefreshToken {
   expiresAt DateTime
   createdAt DateTime @default(now())
 
-  @@index([doctorId])
+  @@index([userId])
   @@index([expiresAt])
   @@index([revokedAt])
 }
 
-model Consultation {
-  id       String @id @default(uuid())
-  doctorId String
-  doctor   Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+model ConsultationSession {
+  sessionId String @id @map("session_id")
 
-  linkToken     String  @unique
-  roomName      String  @unique
-  twilioRoomSid String? @unique
+  patientId String @map("patient_id")
+  patient   User   @relation("ConsultationSessionPatient", fields: [patientId], references: [id], onDelete: Restrict)
 
-  status    ConsultationStatus @default(CREATED)
-  expiresAt DateTime?
+  doctorId String @map("doctor_id")
+  doctor   User   @relation("ConsultationSessionDoctor", fields: [doctorId], references: [id], onDelete: Restrict)
 
-  patientName String?
-  patientIdentity String?
-  patientJoinedAt DateTime?
-  patientCountryCode String?
-  patientCountry String?
-  patientProvince String?
-  patientCity String?
-  patientLatitude Float?
-  patientLongitude Float?
+  sessionType      SessionType      @map("session_type")
+  consultationMode ConsultationMode @map("consultation_mode")
 
-  twilioCallSid String?
-  startedAt     DateTime?
-  endedAt       DateTime?
+  scheduledDate      DateTime  @db.Date @map("scheduled_date")
+  scheduledStartTime DateTime  @map("scheduled_start_time")
+  durationMinutes    Int?      @map("duration_minutes")
+  scheduledEndTime   DateTime? @map("scheduled_end_time")
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  sessionStatus SessionStatus @default(CREATED) @map("session_status")
 
-  callSession      CallSession?
+  createdBy      String @map("created_by")
+  createdByAdmin User   @relation("ConsultationSessionCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+
+  // Twilio technical data retained from old Consultation + CallSession.
+  roomName      String  @unique @map("room_name")
+  twilioRoomSid String? @unique @map("twilio_room_sid")
+
+  doctorIdentity String? @map("doctor_identity")
+  patientIdentity String? @map("patient_identity")
+  patientName     String? @map("patient_name")
+
+  patientCountryCode String? @map("patient_country_code")
+  patientCountry     String? @map("patient_country")
+  patientProvince    String? @map("patient_province")
+  patientCity        String? @map("patient_city")
+  patientLatitude    Float?  @map("patient_latitude")
+  patientLongitude   Float?  @map("patient_longitude")
+
+  doctorJoinedAt  DateTime? @map("doctor_joined_at")
+  patientJoinedAt DateTime? @map("patient_joined_at")
+  startedAt       DateTime? @map("started_at")
+  endedAt         DateTime? @map("ended_at")
+
+  recordingEnabled     Boolean   @default(false) @map("recording_enabled")
+  recordingStatus      String?   @map("recording_status")
+  recordingStartedAt   DateTime? @map("recording_started_at")
+  recordingCompletedAt DateTime? @map("recording_completed_at")
+
+  compositionSid       String?   @unique @map("composition_sid")
+  compositionStatus    String?   @map("composition_status")
+  compositionStartedAt DateTime? @map("composition_started_at")
+  compositionReadyAt   DateTime? @map("composition_ready_at")
+
+  mediaUrl    String? @map("media_url")
+  mediaFormat String? @map("media_format")
+  durationSec Int?    @map("duration_sec")
+  errorMessage String? @map("error_message")
+
   consultationNote ConsultationNote?
-  
+  audits           ConsultationSessionAudit[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([doctorId])
-  @@index([status])
-  @@index([expiresAt])
-}
-
-model CallSession {
-  id             String       @id @default(cuid())
-  consultationId String       @unique
-  consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
-
-  doctorId String?
-  doctor   Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
-
-  status CallStatus @default(STARTED)
-
-  roomSid         String? @unique
-  roomName        String?
-  doctorIdentity  String?
-  patientIdentity String?
-  patientName String?
-  
-  startedAt DateTime?
-  endedAt   DateTime?
-
-  recordingEnabled     Boolean   @default(false)
-  recordingStatus      String?
-  recordingStartedAt   DateTime?
-  recordingCompletedAt DateTime?
-
-  compositionSid       String?   @unique
-  compositionStatus    String?
-  compositionStartedAt DateTime?
-  compositionReadyAt   DateTime?
-
-  mediaUrl    String?
-  mediaFormat String?
-  durationSec Int?
-
-  errorMessage String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([doctorId])
-  @@index([doctorId, createdAt(sort: Desc)])
-  @@index([consultationId])
+  @@index([patientId])
+  @@index([createdBy])
+  @@index([sessionStatus])
+  @@index([scheduledStartTime])
+  @@index([scheduledEndTime])
+  @@index([doctorId, scheduledStartTime])
+  @@index([patientId, scheduledStartTime])
+  @@map("ConsultationSession")
 }
 
 model ConsultationNote {
-  id             String       @id @default(uuid())
-  consultationId String       @unique
-  consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  id                    String              @id @default(uuid())
+  consultationSessionId String              @unique @map("consultation_session_id")
+  consultationSession   ConsultationSession @relation(fields: [consultationSessionId], references: [sessionId], onDelete: Cascade)
 
-  doctorId String?
-  doctor   Doctor? @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+  doctorId String
+  doctor   User   @relation("ConsultationNoteDoctor", fields: [doctorId], references: [id], onDelete: Restrict)
+
+  patientId String  @map("patient_id")
+  patient   User    @relation("ConsultationNotePatient", fields: [patientId], references: [id], onDelete: Restrict)
 
   transcriptRaw String?
   summary       String?
@@ -153,6 +334,9 @@ model ConsultationNote {
   aiStatus String? // PENDING | PROCESSING | COMPLETED | FAILED
   aiError  String?
 
+  isFinalized Boolean   @default(false) @map("is_finalized")
+  finalizedAt DateTime? @map("finalized_at")
+
   transcribedAt DateTime?
   summarizedAt  DateTime?
   aiModel       String?
@@ -161,13 +345,38 @@ model ConsultationNote {
   updatedAt DateTime @updatedAt
 
   @@index([doctorId])
+  @@index([patientId])
   @@index([doctorId, createdAt(sort: Desc)])
-  @@index([consultationId])
+  @@index([patientId, createdAt(sort: Desc)])
+  @@index([consultationSessionId])
+}
+
+model ConsultationSessionAudit {
+  id                    String              @id @default(uuid())
+  consultationSessionId String              @map("consultation_session_id")
+  consultationSession   ConsultationSession @relation(fields: [consultationSessionId], references: [sessionId], onDelete: Cascade)
+
+  actorUserId String?  @map("actor_user_id")
+  actorUser   User?    @relation("ConsultationSessionActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  actorRole   UserRole? @map("actor_role")
+  action      String
+
+  previousStatus SessionStatus? @map("previous_status")
+  newStatus      SessionStatus? @map("new_status")
+  metadata       Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([consultationSessionId])
+  @@index([actorUserId])
+  @@index([createdAt])
+  @@map("ConsultationSessionAudit")
 }
 
 model AuthAuditLog {
   id        String     @id @default(uuid())
-  doctorId  String?
+  userId    String?
+  user      User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
   email     String?
   action    AuthAction
   success   Boolean    @default(false)
@@ -175,25 +384,24 @@ model AuthAuditLog {
   userAgent String?
   createdAt DateTime   @default(now())
 
-  @@index([doctorId])
+  @@index([userId])
   @@index([action])
   @@index([createdAt])
 }
 
-enum ConsultationStatus {
-  CREATED
-  WAITING
-  IN_CALL
-  PROCESSING
-  DONE
-  FAILED
-  EXPIRED
+enum SessionType {
+  SCHEDULED
+  INSTANT
 }
 
-enum CallStatus {
-  STARTED
-  CONNECTED
-  RECORDING_READY
+enum ConsultationMode {
+  VIDEO
+  VOICE
+}
+
+enum SessionStatus {
+  CREATED
+  IN_CALL
   COMPLETED
   FAILED
 }
