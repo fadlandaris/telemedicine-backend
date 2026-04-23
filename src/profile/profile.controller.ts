@@ -10,6 +10,9 @@ import {
   BadRequestException,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import { diskStorage } from "multer";
+import { join, extname } from "path";
+import { existsSync, mkdirSync } from "fs";
 import { JwtGuard } from "../auth/guards/jwt.guard";
 import type { JwtPayload } from "../auth/types/jwt-payload";
 import { CurrentUser } from "../auth/decorators/current-user.decorator";
@@ -25,6 +28,19 @@ import {
   ForgotPasswordRequestDto,
   SetNewPasswordDto,
 } from "../auth/dto/profile-management.dto";
+
+const uploadsDir = join(process.cwd(), "uploads", "profiles");
+if (!existsSync(uploadsDir)) {
+  mkdirSync(uploadsDir, { recursive: true });
+}
+
+const pictureStorage = diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  filename: (_req, file, cb) => {
+    const ext = extname(file.originalname) || "." + file.mimetype.split("/")[1];
+    cb(null, `${Date.now()}-${Math.random().toString(36).substring(7)}${ext}`);
+  },
+});
 
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/svg+xml", "image/avif"];
 const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB
@@ -190,7 +206,7 @@ export class ProfileController {
 
   // ==================== PROFILE PICTURE UPLOAD ====================
   @Post("doctor/upload-picture")
-  @UseInterceptors(FileInterceptor("file"))
+  @UseInterceptors(FileInterceptor("file", { storage: pictureStorage }))
   async uploadPictureDoctor(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: any,
@@ -199,7 +215,7 @@ export class ProfileController {
   }
 
   @Post("admin/upload-picture")
-  @UseInterceptors(FileInterceptor("file"))
+  @UseInterceptors(FileInterceptor("file", { storage: pictureStorage }))
   async uploadPictureAdmin(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: any,
@@ -208,7 +224,7 @@ export class ProfileController {
   }
 
   @Post("patient/upload-picture")
-  @UseInterceptors(FileInterceptor("file"))
+  @UseInterceptors(FileInterceptor("file", { storage: pictureStorage }))
   async uploadPicturePatient(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: any,
@@ -234,7 +250,8 @@ export class ProfileController {
       throw new BadRequestException("Ukuran file maksimal 2MB");
     }
 
-    const filePath = file.path;
-    return this.auth.uploadProfilePicture(userId, filePath);
+    // Store relative path so ServeStaticModule can serve it at /uploads/profiles/<filename>
+    const relativePath = `uploads/profiles/${file.filename}`;
+    return this.auth.uploadProfilePicture(userId, relativePath);
   }
 }

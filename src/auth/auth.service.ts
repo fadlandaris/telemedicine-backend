@@ -111,16 +111,20 @@ export class AuthService {
     ip?: string;
     userAgent?: string;
   }) {
-    await this.prisma.authAuditLog.create({
-      data: {
-        userId: params.userId,
-        email: params.email,
-        action: params.action,
-        success: params.success,
-        ip: params.ip,
-        userAgent: params.userAgent,
-      },
-    });
+    try {
+      await this.prisma.authAuditLog.create({
+        data: {
+          userId: params.userId,
+          email: params.email,
+          action: params.action,
+          success: params.success,
+          ip: params.ip,
+          userAgent: params.userAgent,
+        },
+      });
+    } catch (err) {
+      console.error('[audit] failed to write audit log:', err);
+    }
   }
 
   private async hashPassword(raw: string) {
@@ -1323,6 +1327,7 @@ export class AuthService {
         email: true,
         phone: true,
         license: true,
+        profilePicture: true,
       },
     });
 
@@ -1339,6 +1344,7 @@ export class AuthService {
         email: true,
         phone: true,
         adminId: true,
+        profilePicture: true,
       },
     });
 
@@ -1355,6 +1361,7 @@ export class AuthService {
         email: true,
         phone: true,
         bornDate: true,
+        profilePicture: true,
       },
     });
 
