@@ -139,7 +139,6 @@ export class TwilioService implements OnModuleInit, OnModuleDestroy {
             in: ['CREATED', 'IN_CALL'],
           },
           scheduledEndTime: {
-            not: null,
             lte: now,
           },
         },
